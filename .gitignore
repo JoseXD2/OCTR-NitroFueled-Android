@@ -43,3 +43,5 @@ gpu/shim/bbport_gnm_table.inc
 /launcher.ini
 /CUSA13795*/
 *.pkg
+
+/_android_tmp/

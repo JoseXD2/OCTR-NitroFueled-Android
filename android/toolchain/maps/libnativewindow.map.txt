@@ -1,0 +1,16 @@
+LIBNATIVEWINDOW {
+  global:
+    ANativeWindow_acquire;
+    ANativeWindow_release;
+    ANativeWindow_getWidth;
+    ANativeWindow_getHeight;
+    ANativeWindow_getFormat;
+    ANativeWindow_setBuffersGeometry;
+    ANativeWindow_lock;
+    ANativeWindow_unlockAndPost;
+    AHardwareBuffer_acquire;
+    AHardwareBuffer_release;
+    AHardwareBuffer_describe;
+  local:
+    *;
+};

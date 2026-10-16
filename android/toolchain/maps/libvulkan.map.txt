@@ -1,0 +1,12 @@
+LIBVULKAN {
+  global:
+    vkGetInstanceProcAddr;
+    vkGetDeviceProcAddr;
+    vkCreateInstance;
+    vkEnumerateInstanceExtensionProperties;
+    vkEnumerateInstanceLayerProperties;
+    vkEnumerateInstanceVersion;
+    vkCreateAndroidSurfaceKHR;
+  local:
+    *;
+};

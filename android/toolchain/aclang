@@ -1,0 +1,2 @@
+#!/bin/sh
+exec clang --target=aarch64-linux-android29 --sysroot=/home/claude/w/sysroot --rtlib=compiler-rt --unwindlib=none -fuse-ld=lld "$@"
