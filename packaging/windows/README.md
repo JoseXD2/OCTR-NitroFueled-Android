@@ -19,7 +19,8 @@ pacman -S --needed git patch \
   mingw-w64-clang-x86_64-{spirv-tools,spirv-headers,spirv-cross}
 ```
 
-magic_enum, miniz and xbyak (not packaged by MSYS2) are submodules under `gpu/third_party/`.
+LibAtrac9 (the ATRAC9 audio decoder) is a submodule under `third_party/`; magic_enum, miniz and
+xbyak (not packaged by MSYS2) are submodules under `gpu/third_party/`.
 Then, in the repository (CLANG64 shell):
 
 ```bash

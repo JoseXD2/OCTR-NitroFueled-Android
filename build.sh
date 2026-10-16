@@ -12,7 +12,8 @@ MINGW*|MSYS*)
         command -v "$tool" >/dev/null || { echo "Need $tool from MSYS2 CLANG64 (packaging/windows/README.md)." >&2; exit 1; }
     done
     if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
-          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
+          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ||
+          ! -f third_party/LibAtrac9/C/src/libatrac9.h ]]; then
         git submodule update --init --recursive
     fi
     for patch in gpu/patches/fsr-vulkan/*.patch; do
@@ -67,7 +68,8 @@ fi
 mkdir -p pgo
 # Submodules (git clone --recursive, or: git submodule update --init) and this port's changes
 # to FSR-Vulkan (gpu/patches/fsr-vulkan), applied to its working tree once.
-if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
+if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
+      ! -f third_party/LibAtrac9/C/src/libatrac9.h ]]; then
     git submodule update --init --recursive
 fi
 # bbport 0.51 (issue 124): a checkout updated from an earlier version keeps that version's patch
