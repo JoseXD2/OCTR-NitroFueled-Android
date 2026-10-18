@@ -101,6 +101,7 @@ int bb_android_main(ANativeActivity *activity) {
     wait_for_storage(activity);
     mkdir(DATA_DIR, 0775);
     mkdir(DATA_DIR "/user", 0775);
+    bb_android_reopen_log();
     const char *data = getenv("BB_DATA_DIR") ? getenv("BB_DATA_DIR") : DATA_DIR;
     char game[512], out[512], user[512], config[512];
     snprintf(game, sizeof game, "%s/CUSA13795", data);
@@ -118,6 +119,7 @@ int bb_android_main(ANativeActivity *activity) {
     /* What run.sh sets for the game (docs/sacredfire), the same defaults. */
     set_default("BB_CONFIG", config);
     set_default("BB_GAME_PROFILE", "ctr");
+    set_default("BB_GPU_LOG", "info"); /* test builds: the device, driver and features in the log */
     set_default("BB_NEO", "0");
     set_default("BB_PREUPLOAD", "1");
     set_default("BB_GUEST_IN_PLACE", "0");

@@ -13,6 +13,8 @@ struct ANativeActivity *bb_android_activity(void);
 int bb_android_main(struct ANativeActivity *activity);
 /* Where stdout/stderr are copied (with logcat): /sdcard/SacredFire/sacredfire.log when writable. */
 const char *bb_android_log_path(void);
+/* Moves the log to /sdcard/SacredFire once the shared storage is accessible. */
+void bb_android_reopen_log(void);
 /* True while the activity is paused (in the background). */
 bool bb_android_paused(void);
 

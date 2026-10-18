@@ -204,54 +204,35 @@ __attribute__((weak)) int bb_android_main(ANativeActivity *a) {
 }
 
 static int log_fd = -1;
-static void *log_thread(void *arg) {
-    int fd = (int)(intptr_t)arg;
-    char buf[4096];
-    size_t used = 0;
-    for (;;) {
-        ssize_t n = read(fd, buf + used, sizeof buf - 1 - used);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            break;
-        }
-        if (log_fd >= 0) (void)!write(log_fd, buf + used, (size_t)n);
-        used += (size_t)n;
-        char *line = buf, *nl;
-        while ((nl = memchr(line, '\n', used - (size_t)(line - buf)))) {
-            *nl = 0;
-            __android_log_write(ANDROID_LOG_INFO, TAG, line);
-            line = nl + 1;
-        }
-        used -= (size_t)(line - buf);
-        memmove(buf, line, used);
-        if (used == sizeof buf - 1) { /* a line longer than the buffer */
-            buf[used] = 0;
-            __android_log_write(ANDROID_LOG_INFO, TAG, buf);
-            used = 0;
-        }
-    }
-    return NULL;
+/* stdout/stderr go straight to the log file (written synchronously: an _Exit right after a
+ * message keeps it). Before the shared storage is accessible the file is in the app's own
+ * external folder; bb_android_reopen_log moves it to /sdcard/SacredFire once it is. */
+static void point_output_at(const char *path) {
+    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0664);
+    if (fd < 0) return;
+    fflush(stdout);
+    fflush(stderr);
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+    if (log_fd >= 0) close(log_fd);
+    log_fd = fd;
+    snprintf(log_path, sizeof log_path, "%s", path);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "log: %s", path);
 }
 static void start_logging(void) {
-    /* /sdcard/SacredFire (the game's folder, readable by the player) when it is writable, else the
-     * app's external files folder. */
-    mkdir("/sdcard/SacredFire", 0775);
-    snprintf(log_path, sizeof log_path, "/sdcard/SacredFire/sacredfire.log");
-    log_fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0664);
-    if (log_fd < 0 && activity && activity->externalDataPath) {
-        snprintf(log_path, sizeof log_path, "%s/sacredfire.log", activity->externalDataPath);
-        log_fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0664);
-    }
-    int fds[2];
-    if (pipe(fds) != 0) return;
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
-    dup2(fds[1], STDOUT_FILENO);
-    dup2(fds[1], STDERR_FILENO);
-    close(fds[1]);
-    pthread_t t;
-    pthread_create(&t, NULL, log_thread, (void *)(intptr_t)fds[0]);
-    pthread_detach(t);
+    mkdir("/sdcard/SacredFire", 0775);
+    if (access("/sdcard/SacredFire", W_OK) == 0) point_output_at("/sdcard/SacredFire/sacredfire.log");
+    if (log_fd < 0 && activity && activity->externalDataPath) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/sacredfire.log", activity->externalDataPath);
+        point_output_at(path);
+    }
+}
+void bb_android_reopen_log(void) {
+    if (strcmp(log_path, "/sdcard/SacredFire/sacredfire.log") != 0 && access("/sdcard/SacredFire", W_OK) == 0)
+        point_output_at("/sdcard/SacredFire/sacredfire.log");
 }
 
 static void *main_thread(void *arg) {
