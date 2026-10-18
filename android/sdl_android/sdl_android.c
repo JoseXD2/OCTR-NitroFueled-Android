@@ -18,6 +18,7 @@
 #include <android/window.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -1145,6 +1146,14 @@ static void on_low_memory(ANativeActivity *a) {
 }
 
 bool bb_android_paused(void) { return atomic_load(&app_paused); }
+
+/* Heap pointer tagging (Android 11+, top byte of malloc results) off: the game keeps host pointers
+ * (thread handles, TLS blocks) in 40-bit fields, and a tag lost there makes free() abort. The
+ * level can only be lowered at run time; this runs when the library is loaded, before the port
+ * allocates anything it hands to the game. */
+__attribute__((constructor(101))) static void disable_heap_tagging(void) {
+    mallopt(-204 /* M_BIONIC_SET_HEAP_TAGGING_LEVEL */, 0 /* M_HEAP_TAGGING_LEVEL_NONE */);
+}
 
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *a, void *saved_state, size_t saved_state_size) {
     (void)saved_state; (void)saved_state_size;

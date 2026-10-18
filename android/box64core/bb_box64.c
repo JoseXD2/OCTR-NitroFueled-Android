@@ -105,7 +105,7 @@ int FileExist(const char *filename, int flags) {
 }
 size_t FileSize(const char *filename) { struct stat sb; return stat(filename, &sb) ? 0 : (size_t)sb.st_size; }
 int MakeDir(const char *folder) { return mkdir(folder, 0755) == 0 || errno == EEXIST; }
-char *box_strdup(const char *s) { return strdup(s); }
+/* box_strdup is a macro for strdup in Box64's debug.h (no malloc hooks): nothing to define. */
 void PersonalityAddrLimit32Bit(void) {}
 int IsAddrElfOrFileMapped(uintptr_t addr) { (void)addr; return 0; }
 void *GetSeg43Base(void *emu) { (void)emu; return NULL; }
