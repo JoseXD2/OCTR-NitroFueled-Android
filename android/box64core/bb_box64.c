@@ -265,7 +265,10 @@ static bridge_t32 *new_bridge_slot(void) {
         bridge_chunk = p;
         bridge_used = 0;
         bridge_capacity = size / sizeof(bridge_t32);
-        setProtection_box((uintptr_t)p, size, PROT_READ | PROT_EXEC);
+        /* Writable in Box64's map too: the dynarec write-protects pages it translates (bridges
+         * included) and gives write access back on the next write fault (bbx_handle_fault)
+         * or unprotectDB; a page it believes read-only would stay read-only. */
+        setProtection_box((uintptr_t)p, size, PROT_READ | PROT_WRITE | PROT_EXEC);
         if (bridge_range_count < 64) {
             bridge_ranges[bridge_range_count][0] = (uintptr_t)p;
             bridge_ranges[bridge_range_count][1] = (uintptr_t)p + size;
@@ -308,6 +311,7 @@ static void *make_bridge(const void *fn, const char *name, const char *sig) {
         free(old);
     }
     bridge_t32 *b = new_bridge_slot();
+    unprotectDB((uintptr_t)b, sizeof(*b), 1); /* the page may hold translated bridges */
     b->CC = 0xcc; b->S = 'S'; b->C = 'C';
     b->w = wrapper_for_signature(sig);
     b->f = (uintptr_t)fn;
