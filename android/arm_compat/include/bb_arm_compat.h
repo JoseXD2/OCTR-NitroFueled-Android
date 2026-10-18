@@ -26,4 +26,9 @@ static inline __attribute__((always_inline)) uint64_t bb_cntfrq(void) {
 #define _mm_mfence() __asm__ volatile("dmb ish" ::: "memory")
 #define _mm_sfence() __asm__ volatile("dmb ishst" ::: "memory")
 #endif
+/* Boost.Asio (1.83) uses std::nested_exception without including <exception>; libc++ 19's
+ * granular headers no longer bring it in transitively. */
+#ifdef __cplusplus
+#include <exception>
+#endif
 #endif

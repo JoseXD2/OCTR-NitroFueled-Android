@@ -4,6 +4,10 @@
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <queue>
+#ifdef BB_ANDROID
+// SacredFire Android: generate x86-64 code on the ARM64 host (interpreted, see bbport_srt_vm.cpp).
+#define XBYAK64 1
+#endif
 #include <xbyak/xbyak.h>
 #include <xbyak/xbyak_util.h>
 #include "common/arch.h"

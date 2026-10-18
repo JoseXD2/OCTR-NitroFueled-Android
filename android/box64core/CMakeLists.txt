@@ -5,6 +5,19 @@ project(box64core C ASM)
 set(BOX64_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../box64" CACHE PATH "Box64 source tree")
 set(B ${BOX64_ROOT})
 include(${CMAKE_CURRENT_SOURCE_DIR}/sources.cmake)
+# Box64's generated headers (its own build makes them with git and a Python script), written
+# into the build directory, which is on the include path.
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/BOX64_COMMIT B64_COMMIT_LINE)
+string(REGEX MATCH "^[0-9a-f]+" B64_COMMIT "${B64_COMMIT_LINE}")
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/git_head.h.tmp "#define GITREV \"${B64_COMMIT}\"\n")
+configure_file(${CMAKE_CURRENT_BINARY_DIR}/git_head.h.tmp ${CMAKE_CURRENT_BINARY_DIR}/git_head.h COPYONLY)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+execute_process(COMMAND ${Python3_EXECUTABLE} ${B}/tools/gen_dynacache_hashes.py --root ${B}
+                        --output ${CMAKE_CURRENT_BINARY_DIR}/dynacache_hashes.h
+                RESULT_VARIABLE B64_HASHES_RESULT)
+if(NOT B64_HASHES_RESULT EQUAL 0)
+    message(FATAL_ERROR "box64core: gen_dynacache_hashes.py failed")
+endif()
 foreach(STEP_VALUE RANGE 3)
     add_library(b64_pass${STEP_VALUE} OBJECT ${DYNAREC_PASS})
     target_compile_definitions(b64_pass${STEP_VALUE} PRIVATE STEP=${STEP_VALUE})
