@@ -84,7 +84,9 @@ static std::optional<std::filesystem::path> GetBundleParentDirectory() {
 }
 #endif
 
-static auto UserPaths = [] {
+// SacredFire Android: built on first use, not at load: the library is dlopened before the app has
+// set BB_GPU_USER_DIR (and before it may write to the shared storage).
+static auto BuildUserPaths() {
     // bbport: the port keeps GPU caches where BB_GPU_USER_DIR points.
     const char* port_dir = std::getenv("BB_GPU_USER_DIR");
     auto user_dir = port_dir ? std::filesystem::path(port_dir) : std::filesystem::current_path() / PORTABLE_DIR;
@@ -94,7 +96,7 @@ static auto UserPaths = [] {
 #ifdef __APPLE__
         user_dir =
             std::filesystem::path(getenv("HOME")) / "Library" / "Application Support" / "shadPS4";
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(BB_ANDROID)
         const char* xdg_data_home = getenv("XDG_DATA_HOME");
         if (xdg_data_home != nullptr && strlen(xdg_data_home) > 0) {
             user_dir = std::filesystem::path(xdg_data_home) / "shadPS4";
@@ -151,7 +153,12 @@ static auto UserPaths = [] {
     }
 
     return paths;
-}();
+}
+static std::unordered_map<PathType, fs::path>& UserPathsRef() {
+    static auto paths = BuildUserPaths();
+    return paths;
+}
+#define UserPaths UserPathsRef()
 
 bool ValidatePath(const fs::path& path) {
     if (path.empty()) {
