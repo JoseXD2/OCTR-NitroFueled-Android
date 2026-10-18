@@ -16,6 +16,9 @@
 #include "bbport_settings.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
+#ifdef BB_ANDROID
+#include "sdl_android.h"
+#endif
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -990,7 +993,34 @@ bool HandleEvent(const SDL_Event& event) {
     }
 }
 
+#ifdef BB_ANDROID
+// SacredFire Android: the touch controls (android/sdl_android: layout and input), drawn over the game.
+void TouchControls() {
+    if (!bb_android_touch_controls_visible()) {
+        return;
+    }
+    const ImVec2 size = ImGui::GetIO().DisplaySize;
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    int count = 0;
+    const BbTouchControl* controls = bb_android_touch_controls(&count);
+    for (int i = 0; i < count; ++i) {
+        float x = 0, y = 0;
+        bb_android_touch_control_center(&controls[i], size.x, size.y, &x, &y);
+        const float r = controls[i].radius * size.y;
+        draw->AddCircleFilled(ImVec2(x, y), r, IM_COL32(255, 255, 255, 40), 40);
+        draw->AddCircle(ImVec2(x, y), r, IM_COL32(255, 255, 255, 110), 40, 2.0f);
+        const ImVec2 text = ImGui::CalcTextSize(controls[i].label);
+        draw->AddText(ImVec2(x - text.x * 0.5f, y - text.y * 0.5f), IM_COL32(255, 255, 255, 170), controls[i].label);
+    }
+}
+#endif
+
 bool Visible() {
+#ifdef BB_ANDROID
+    if (initialized && bb_android_touch_controls_visible()) {
+        return true;
+    }
+#endif
     return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps);
 }
 
@@ -1042,6 +1072,11 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (prompt_active && !menu_open) {
         TextPrompt();
     }
+#ifdef BB_ANDROID
+    if (!menu_open) {
+        TouchControls();
+    }
+#endif
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{
