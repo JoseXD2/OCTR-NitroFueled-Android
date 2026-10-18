@@ -5,11 +5,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#if defined(__x86_64__)
 #include <cpuid.h>
+#endif
 #include "runtime.h"
+#include "guest_call.h"
 #include "gpu/bbgpu.h"
-#if !defined(__x86_64__) || !defined(__GNUC__)
-#error This prototype requires x86-64 GCC or Clang (including MinGW).
+#if !defined(__GNUC__) || !(defined(__x86_64__) || (defined(BB_ANDROID) && defined(__aarch64__)))
+#error This prototype requires x86-64 GCC or Clang (including MinGW), or the Android ARM64 port.
+#endif
+#ifdef BB_ANDROID
+/* SacredFire Android: the game's x86-64 code runs on Box64 (android/box64core); this file is the
+ * loader, entered from the NativeActivity (android/app) instead of main. */
+#define main bb_probe_main
+int bb_probe_main(int argc, char **argv);
 #endif
 #ifdef _WIN32
 #include <windows.h>
@@ -47,6 +56,10 @@ static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message);
  * them stops at the first one with SIGILL (exit code 132, issue #26), and lzcnt/tzcnt even run as
  * bsr/bsf there, with other results. Said before the game starts; BB_SKIP_CPU_CHECK=1 skips it. */
 static void check_cpu(void) {
+#ifndef __x86_64__
+    return; /* Box64 provides the instructions */
+#endif
+#ifdef __x86_64__
     const char *skip = getenv("BB_SKIP_CPU_CHECK");
     if (skip && !strcmp(skip, "1")) return;
     unsigned a, b, c, d, leaf1_c = 0, leaf7_b = 0, ext1_c = 0;
@@ -76,6 +89,7 @@ static void check_cpu(void) {
             "these instructions directly: it needs an Intel Haswell (4th generation Core, 2013) or "
             "newer, or an AMD Ryzen. BB_SKIP_CPU_CHECK=1 starts anyway.\n", missing);
     exit(1);
+#endif
 }
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
@@ -107,7 +121,15 @@ static void protect(void *p, size_t size, unsigned flags) {
     FlushInstructionCache(GetCurrentProcess(), p, size);
 #else
     int mode = ((flags & 4) ? PROT_READ : 0) | ((flags & 2) ? PROT_WRITE : 0) | ((flags & 1) ? PROT_EXEC : 0);
+#ifdef BB_ANDROID
+    /* Guest code is read by Box64, never executed by the host: executable segments stay readable
+     * (and are announced to Box64, which write-protects them while it holds translations). */
+    if (mode & PROT_EXEC) mode = (mode & ~PROT_EXEC) | PROT_READ;
     if (mprotect(p, size, mode)) fail("mprotect failed");
+    if (flags & 1) bbx_code_mapped(p, size, PROT_READ | PROT_EXEC);
+#else
+    if (mprotect(p, size, mode)) fail("mprotect failed");
+#endif
 #endif
 }
 static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argument) {
@@ -126,7 +148,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     fflush(NULL);
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
-#ifndef _WIN32
+#if !defined(_WIN32) && defined(__x86_64__)
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
 __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
@@ -135,6 +157,18 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
+#ifdef BB_ANDROID
+/* The guest main thread's stack (8 MiB below 1 TiB), given to Box64 before the thread's first
+ * guest call: module initializers and the game's entry run on it. */
+static unsigned char *main_guest_stack(void) {
+    static unsigned char *stack;
+    if (!stack) {
+        stack=runtime_low_map(8*1024*1024,PROT_READ|PROT_WRITE);
+        if (stack) bbx_thread_stack(stack,8*1024*1024);
+    }
+    return stack;
+}
+#endif
 #ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
@@ -291,7 +325,14 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. */
     ucontext_t *uc = context;
+#ifdef BB_ANDROID
+    /* Box64 first: a write to a page holding translated guest code. */
+    if ((sig == SIGSEGV || sig == SIGBUS) && bbx_handle_fault(info->si_addr, context)) return;
+    uintptr_t rip = (uintptr_t)uc->uc_mcontext.pc;
+    const uintptr_t guest_pc = bbx_guest_pc(rip);
+#else
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+#endif
     char line[512];
     Dl_info where;
     if (rip - (uintptr_t)image < 0x10000000)
@@ -303,6 +344,13 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+#ifdef BB_ANDROID
+    if (guest_pc) {
+        snprintf(line, sizeof(line), "  in translated guest code: guest offset 0x%lx\n", (unsigned long)(guest_pc - (uintptr_t)image));
+        { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    }
+    bbx_dump_thread(2);
+#endif
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Outside the image and any shared object (generated code, a freed mapping): the mapping
      * from /proc/self/maps, and the thread. */
@@ -348,11 +396,17 @@ static void write_hex(char *out, uint64_t v) {
 }
 static void dump_frames(ucontext_t *uc) {
     char line[] = "  tid=0000000000000000 rip=0000000000000000 image-relative=0000000000000000 host-relative=0000000000000000\n";
+#ifdef __aarch64__
+    uintptr_t rip=(uintptr_t)uc->uc_mcontext.pc, rbp=(uintptr_t)uc->uc_mcontext.regs[29];
+    const uint64_t arg0=(uint64_t)uc->uc_mcontext.regs[0];
+#else
     uintptr_t rip=(uintptr_t)uc->uc_mcontext.gregs[REG_RIP], rbp=(uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+    const uint64_t arg0=(uint64_t)uc->uc_mcontext.gregs[REG_RDI];
+#endif
     uint64_t tid=(uint64_t)gettid();
     /* First argument register: the lock address when a thread waits on a futex. */
     char arg[]="  tid=0000000000000000 rdi=0000000000000000\n";
-    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)uc->uc_mcontext.gregs[REG_RDI]);
+    write_hex(arg+6,tid); write_hex(arg+27,arg0);
     { ssize_t written_=write(2,arg,sizeof(arg)-1); (void)written_; }
     for (int depth=0; depth<24; ++depth) {
         write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
@@ -364,7 +418,12 @@ static void dump_frames(ucontext_t *uc) {
         rbp=frame[0]; rip=frame[1];
     }
 }
-static void thread_dump(int sig, siginfo_t *info, void *context) { (void)sig; (void)info; dump_frames(context); }
+static void thread_dump(int sig, siginfo_t *info, void *context) {
+    (void)sig; (void)info; dump_frames(context);
+#ifdef BB_ANDROID
+    bbx_dump_thread(2);
+#endif
+}
 static void watchdog(int sig, siginfo_t *info, void *context) {
     (void)info;
     const char head[]="STOP: watchdog timeout; thread stacks:\n";
@@ -487,6 +546,13 @@ void runtime_restart(void) {
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
     TerminateProcess(GetCurrentProcess(),0);
 #else
+#ifdef BB_ANDROID
+    /* SacredFire Android: the app is started again by the player (the launcher reads the new
+     * settings at start). */
+    puts("Runtime: restart requested: the app closes; open it again to apply the settings");
+    fflush(NULL);
+    _exit(0);
+#endif
     puts("Runtime: restarting through run.sh");
     syscall(SYS_close_range, 3u, ~0u, 0u);
     execlp("bash", "bash", "run.sh", (char *)NULL);
@@ -500,10 +566,21 @@ int main(int argc, char **argv) {
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
+#ifdef M_ARENA_MAX
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
+#endif
+#ifdef BB_ANDROID
+    {
+        /* BB_DYNAREC=0: Box64's interpreter only (diagnostics); BB_STRONGMEM: its memory ordering. */
+        const char *dynarec=getenv("BB_DYNAREC"), *strongmem=getenv("BB_STRONGMEM"), *box_log=getenv("BB_BOX64_LOG");
+        bbx_configure(dynarec ? atoi(dynarec) : 1, strongmem ? atoi(strongmem) : 1, box_log ? atoi(box_log) : 0);
+        if (bbx_init()) fail("Box64 initialization failed");
+    }
+#else
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
+#endif
 #ifdef _WIN32
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
      * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
@@ -714,7 +791,7 @@ int main(int argc, char **argv) {
         unsigned char *t = traps + i * 32;
         /* SysV: mov edi, index; movabs rax, handler; jmp rax. No fake return values. */
         uint32_t index = (uint32_t)i;
-        uintptr_t handler = (uintptr_t)unresolved;
+        uintptr_t handler = GUEST_EXPORT(unresolved);
         t[0] = 0x48; t[1] = 0x89; t[2] = 0xfe; /* mov rsi,rdi: preserve arg0 */
         t[3] = 0xbf; memcpy(t + 4, &index, 4);
         t[8] = 0x48; t[9] = 0xb8; memcpy(t + 10, &handler, 8);
@@ -729,6 +806,11 @@ int main(int argc, char **argv) {
                         : (uintptr_t)image + relocs[i].value;
         if (relocs[i].kind) {
             uintptr_t resolved = runtime_resolve(names[relocs[i].value], relocs[i].kind == 2);
+#ifdef BB_ANDROID
+            /* Native functions reach the game through Box64 bridges (data stays as it is). */
+            if (resolved && relocs[i].kind == 1 && bb_is_native_code((const void *)resolved))
+                resolved = (uintptr_t)bbx_bridge((const void *)resolved, names[relocs[i].value]);
+#endif
             if (resolved) { value = resolved + relocs[i].addend; outcome[relocs[i].value] = 1; }
             else if (native_libc && bindings[relocs[i].value]) {
                 uint64_t address=bindings[relocs[i].value];
@@ -775,13 +857,16 @@ int main(int argc, char **argv) {
                 runtime_set_module_tls(modules[m].tls_module,image+modules[m].tls_address,modules[m].tls_filesz,modules[m].tls_memsz);
         }
         runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
+#ifdef BB_ANDROID
+        main_guest_stack();
+#endif
         runtime_thread_attach_main();
         runtime_set_procparam(image+procparam);
         /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
         for (uint64_t m=0;m<module_count;++m) {
             printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);
             typedef int (ABI *ModuleInit)(uint64_t,void *,void *);
-            int result=((ModuleInit)(image+modules[m].init))(0,NULL,NULL);
+            int result=(int)GUEST_CALL3((ModuleInit)(image+modules[m].init),0,NULL,NULL);
             printf("Module %" PRIu64 " initializer returned %d\n",m,result);
             if (result) fail("module initializer failed");
         }
@@ -795,9 +880,17 @@ int main(int argc, char **argv) {
 #else
     /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */
     enum { MAIN_STACK=8*1024*1024 };
+#ifdef BB_ANDROID
+    unsigned char *stack=main_guest_stack();
+#else
     unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
+#endif
     if (!stack) fail("cannot allocate guest main stack");
+#ifdef BB_ANDROID
+    bbx_call_on_stack((uintptr_t)(image+entry),(uint64_t)(uintptr_t)&params,GUEST_EXPORT(guest_exit),stack+MAIN_STACK-64);
+#else
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
+#endif
 #endif
     fail("entry unexpectedly returned");
 }

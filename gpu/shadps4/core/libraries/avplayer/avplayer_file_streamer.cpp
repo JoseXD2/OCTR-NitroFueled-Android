@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "src/guest_call.h"
 #include <algorithm> // std::max, std::min
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
 
@@ -24,17 +25,17 @@ AvPlayerFileStreamer::~AvPlayerFileStreamer() {
     if (m_file_replacement.close != nullptr && m_fd >= 0) {
         const auto close = m_file_replacement.close;
         const auto ptr = m_file_replacement.object_ptr;
-        close(ptr);
+        BB_GUEST_CALL(close, ptr);
     }
 }
 
 bool AvPlayerFileStreamer::Init(std::string_view path) {
     const auto ptr = m_file_replacement.object_ptr;
-    m_fd = m_file_replacement.open(ptr, path.data());
+    m_fd = BB_GUEST_CALL(m_file_replacement.open, ptr, path.data());
     if (m_fd < 0) {
         return false;
     }
-    m_file_size = m_file_replacement.size(ptr);
+    m_file_size = BB_GUEST_CALL(m_file_replacement.size, ptr);
     // avio_buffer is deallocated in `avio_context_free`
     const auto avio_buffer = reinterpret_cast<u8*>(av_malloc(AVPLAYER_AVIO_BUFFER_SIZE));
     m_avio_context =
@@ -57,7 +58,7 @@ s32 AvPlayerFileStreamer::ReadPacket(void* opaque, u8* buffer, s32 size) {
     }
     const auto read_offset = self->m_file_replacement.read_offset;
     const auto ptr = self->m_file_replacement.object_ptr;
-    const auto bytes_read = read_offset(ptr, buffer, self->m_position, size);
+    const auto bytes_read = BB_GUEST_CALL(read_offset, ptr, buffer, self->m_position, size);
     if (bytes_read == 0 && size != 0) {
         return AVERROR_EOF;
     }

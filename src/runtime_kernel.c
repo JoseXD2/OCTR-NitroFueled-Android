@@ -23,7 +23,10 @@
 #include <sys/resource.h>
 #endif
 #include <sys/time.h>
+#if defined(__x86_64__)
 #include <x86intrin.h>
+#endif
+#include "guest_call.h"
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define PAGE 16384
 
@@ -265,7 +268,7 @@ static ABI int32_t thread_once(int32_t *once,void (ABI *routine)(void)) {
         int32_t state=__atomic_load_n(once,__ATOMIC_ACQUIRE);
         if (state==1) return 0;
         if (state==0 && __atomic_compare_exchange_n(once,&state,2,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
-            routine();
+            GUEST_CALL0(routine);
             __atomic_store_n(once,1,__ATOMIC_RELEASE);
             return 0;
         }
@@ -309,7 +312,7 @@ void runtime_thread_keys_cleanup(void) {
             void *value=key_values[i];
             if (!value || !keys[i].used || !keys[i].destructor) continue;
             key_values[i]=NULL; any=1;
-            keys[i].destructor(value);
+            GUEST_CALL1(keys[i].destructor,value);
         }
         if (!any) break;
     }
@@ -334,7 +337,7 @@ static ABI int32_t set_thread_atexit_report(ThreadHook f) { thread_atexit_report
 static ABI void rtld_atexit_increment(uint64_t *counter) { if (counter) __atomic_fetch_add(counter,1,__ATOMIC_SEQ_CST); }
 static ABI void rtld_atexit_decrement(uint64_t *counter) { if (counter) __atomic_fetch_sub(counter,1,__ATOMIC_SEQ_CST); }
 void runtime_kernel_thread_exit(void) {
-    if (thread_dtors) { ++thread_dtor_runs; thread_dtors(); }
+    if (thread_dtors) { ++thread_dtor_runs; GUEST_CALL0(thread_dtors); }
 }
 /* __pthread_cxa_finalize(dso): run the __cxa_atexit handlers registered for a module (libc's
  * module_stop). The runtime owns the handler list (runtime_finalize). */
@@ -550,7 +553,7 @@ void runtime_wait_report(double frames) {
     printf("\n");
 }
 
-#ifndef _WIN32
+#if !defined(_WIN32) && defined(__x86_64__)
 /* bbport BB_SAMPLE_THREAD=<name> (with frame stats): where that thread runs, sampled with SIGPROF
  * every 0.5 ms; reported with the wait profile. A thread that never blocks but waits for the GPU
  * shows up spinning in its polling loop. */
@@ -656,7 +659,7 @@ static void sample_report(void) {
     printf("\n");
 }
 #else
-/* Thread sampling uses SIGPROF and /proc (Linux only). */
+/* Thread sampling uses SIGPROF, /proc and x86 registers (Linux x86-64 only). */
 static void sample_start(void) {}
 static void sample_report(void) {}
 #endif

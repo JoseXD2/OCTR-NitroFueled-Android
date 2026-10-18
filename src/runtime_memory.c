@@ -23,6 +23,15 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef BB_ANDROID
+#include <sys/syscall.h>
+#include "bb_box64.h"
+/* bionic declares memfd_create from API 30; the system call exists since Linux 3.17. */
+#define memfd_create(name, flags) ((int)syscall(__NR_memfd_create, (name), (flags)))
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 1U
+#endif
+#endif
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB; on the PS4 Pro (BB_NEO=1) 5568 MiB.
  * BB_DMEM_MB raises it (the resolution patches above 1080p need about 4 GiB more; run.sh sets it). */
@@ -391,14 +400,45 @@ static void zero_phys(uint64_t phys, uint64_t size) {
     }
 }
 void runtime_memory_reserve(void) {}
+#ifdef BB_ANDROID
+/* SacredFire Android: guest code is read by Box64, not executed by the host. Executable guest
+ * memory is mapped readable and announced to Box64 (which tracks writes to translated code). */
+static int android_code_prot(uintptr_t address, uint64_t size, int prot) {
+    if (prot & PROT_EXEC) return (prot & ~PROT_EXEC) | PROT_READ;
+    (void)address; (void)size;
+    return prot;
+}
+static void android_code_note(uintptr_t address, uint64_t size, int prot) {
+    if (prot & PROT_EXEC) bbx_code_mapped((void *)address,size,PROT_READ|PROT_EXEC);
+}
+#endif
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+#ifdef BB_ANDROID
+    const int guest_prot=prot;
+    prot=android_code_prot(address,size,prot);
+#endif
     void *mapped = !reserved
         ? map_phys(address,size,prot,phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
+#ifdef BB_ANDROID
+    if (mapped!=MAP_FAILED && !reserved) android_code_note(address,size,guest_prot);
+#endif
     return mapped==MAP_FAILED ? -1 : 0;
 }
+#ifdef BB_ANDROID
+static int host_unmap(uintptr_t address, uint64_t size) {
+    bbx_code_unmapped((void *)address,size);
+    return munmap((void *)address,size);
+}
+static int host_protect(uintptr_t address, uint64_t size, int prot) {
+    const int r=mprotect((void *)address,size,android_code_prot(address,size,prot));
+    if (!r) android_code_note(address,size,prot);
+    return r;
+}
+#else
 static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
+#endif
 static void host_discard(uint64_t phys, uint64_t size) { zero_phys(phys,size); }
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
@@ -849,6 +889,8 @@ void *runtime_low_map(size_t size, int prot) {
     void *p=MAP_FAILED;
     while (low_next+size<=USER_MIN) {
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+        /* Kernels before 4.17 take MAP_FIXED_NOREPLACE as a hint and may map elsewhere. */
+        if (p!=MAP_FAILED && p!=(void *)low_next) { munmap(p,size); p=MAP_FAILED; }
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
     }

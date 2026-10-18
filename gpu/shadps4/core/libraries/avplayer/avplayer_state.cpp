@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "src/guest_call.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
@@ -92,7 +93,7 @@ void AvPlayerState::DefaultEventCallback(void* opaque, AvPlayerEvents event_id, 
     const auto callback = self->m_event_replacement.event_callback;
     const auto ptr = self->m_event_replacement.object_ptr;
     if (callback != nullptr) {
-        callback(ptr, event_id, 0, event_data);
+        BB_GUEST_CALL(callback, ptr, event_id, 0, event_data);
     }
 }
 
@@ -432,7 +433,7 @@ void AvPlayerState::EmitEvent(AvPlayerEvents event_id, void* event_data) {
     const auto callback = m_init_data.event_replacement.event_callback;
     if (callback) {
         const auto ptr = m_init_data.event_replacement.object_ptr;
-        callback(ptr, event_id, 0, event_data);
+        BB_GUEST_CALL(callback, ptr, event_id, 0, event_data);
     }
 }
 

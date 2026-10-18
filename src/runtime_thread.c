@@ -20,8 +20,11 @@
 #else
 #include <sys/syscall.h>
 #include <sys/mman.h>
+#ifdef __x86_64__
 #include <asm/prctl.h>
 #endif
+#endif
+#include "guest_call.h"
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define ATTR_MAGIC UINT32_C(0x41545452)
 #define STACK_MARGIN (256*1024)
@@ -43,6 +46,7 @@ typedef struct GuestThread {
     pthread_t host;
     GuestEntry entry;
     void *argument, *result;
+    void *guest_stack; size_t guest_stack_size; /* Android: the stack the guest code runs on */
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
@@ -82,6 +86,10 @@ static void set_gs(void *base) {
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
+#elif defined(BB_ANDROID)
+/* SacredFire Android: the guest's GS base is Box64's segment base for this thread. */
+static void set_gs(void *base) { bbx_set_gs_base((uint64_t)(uintptr_t)base); }
+#define tls_block_alloc(size) aligned_alloc(64,size)
 #else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
@@ -257,12 +265,19 @@ static void set_host_name(const char *name) {
 #endif
 static void *host_start(void *p) {
     GuestThread *t=p;
+#ifdef BB_ANDROID
+    /* The guest stack (below 1 TiB) is Box64's for this thread; the host thread keeps its own. */
+    if (t->guest_stack) bbx_thread_stack(t->guest_stack,t->guest_stack_size);
+#endif
     attach(t);
     set_host_name(t->name);
-    if (!exit_setjmp(t)) t->result=t->entry(t->argument);
+    if (!exit_setjmp(t)) t->result=(void *)(uintptr_t)GUEST_CALL1(t->entry,t->argument);
     runtime_kernel_thread_exit();
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
+#ifdef BB_ANDROID
+    bbx_thread_exit();
+#endif
     return t->result;
 }
 static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,void *argument,const char *name) {
@@ -283,6 +298,10 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     /* Windows places the stack itself (low: no high-entropy ASLR) and commits all of it:
      * guest code has no stack probes and would step over the guard page. */
     pthread_attr_setstacksize(&host,stack_bytes);
+#elif defined(BB_ANDROID)
+    t->guest_stack=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
+    t->guest_stack_size=t->guest_stack ? stack_bytes : 0;
+    pthread_attr_setstacksize(&host,2*1024*1024); /* native code (runtime, renderer calls) */
 #else
     void *stack_memory=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
     if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
