@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_guest_memory.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(BB_ANDROID) // SacredFire Android: as on Windows
 // SacredFire (Windows): no dma-buf on Windows; the PC memory model stays off and direct memory
 // stays in the runtime's pagefile section.
 namespace BbGuestMemory {

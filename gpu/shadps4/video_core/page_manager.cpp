@@ -48,9 +48,8 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
-#else
-#include "common/spin_lock.h"
 #endif
+#include "common/spin_lock.h" // SacredFire Android: bionic has no adaptive mutex
 
 extern "C" void runtime_memory_set_write_watch(uintptr_t address, uint64_t size, int watch);
 

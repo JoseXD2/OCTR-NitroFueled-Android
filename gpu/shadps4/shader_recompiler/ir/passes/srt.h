@@ -16,6 +16,18 @@ namespace Shader {
 using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 
+#ifdef BB_ANDROID
+// SacredFire Android: walkers are x86-64 code, interpreted on ARM64 (gpu/shim/bbport_srt_vm.cpp).
+void BbSrtVmRun(PFN_SrtWalker walker, const u32* user_data, u32* flat_dst);
+inline void CallSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat_dst) {
+    BbSrtVmRun(walker, user_data, flat_dst);
+}
+#else
+inline void CallSrtWalker(PFN_SrtWalker walker, const u32* user_data, u32* flat_dst) {
+    walker(user_data, flat_dst);
+}
+#endif
+
 struct PersistentSrtInfo {
     // Special case when fetch shader uses step rates.
     struct SrtSharpReservation {

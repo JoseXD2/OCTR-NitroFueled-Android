@@ -23,11 +23,17 @@
 #include "shader_recompiler/ir/srt_gvn_table.h"
 #include "shader_recompiler/ir/value.h"
 
-#ifdef ARCH_X86_64
+// SacredFire Android: the x86-64 walkers are generated as on x86 (into a non-executable buffer)
+// and interpreted (gpu/shim/bbport_srt_vm.cpp), which also handles faulting loads.
+#if defined(ARCH_X86_64) || defined(BB_ANDROID)
 
 using namespace Xbyak::util;
 
+#ifdef BB_ANDROID
+static Xbyak::CodeGenerator g_srt_codegen(32_MB, Xbyak::DontSetProtectRWE);
+#else
 static Xbyak::CodeGenerator g_srt_codegen(32_MB);
+#endif
 static const u8* g_srt_codegen_start = nullptr;
 
 namespace Shader {
@@ -646,7 +652,9 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
         auto* signals = Core::Signals::Instance();
         // Call after the memory invalidation handler
         constexpr u32 priority = 1;
+#ifndef BB_ANDROID
         signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
+#endif
     }
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();

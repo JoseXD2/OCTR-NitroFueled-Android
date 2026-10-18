@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_gnm_hooks.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(BB_ANDROID) // SacredFire Android: as on Windows
 // SacredFire (Windows): the libGnm hooks have no function table in SacredFire (it was generated
 // from Bloodborne's executable) and their trampolines use Linux mappings: off on Windows.
 namespace BbGnmHooks {
