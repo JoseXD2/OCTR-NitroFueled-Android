@@ -199,6 +199,11 @@ public:
     }
 
     /// Returns true when VK_EXT_vertex_input_dynamic_state is supported.
+    /// SacredFire Android: VK_EXT_robustness2's nullDescriptor (else bbport_null_resources).
+    bool IsNullDescriptorSupported() const {
+        return null_descriptor;
+    }
+
     bool IsVertexInputDynamicState() const {
         return vertex_input_dynamic_state;
     }
@@ -585,6 +590,10 @@ private:
     bool dynamic_state_3{};
     bool depth_range_unrestricted{};
     bool vertex_input_dynamic_state{};
+    bool robustness2{true};
+    bool robustness2_buffer{true};
+    bool robustness2_image{true};
+    bool null_descriptor{true};
     bool list_restart{};
     bool provoking_vertex{};
     bool shader_stencil_export{};

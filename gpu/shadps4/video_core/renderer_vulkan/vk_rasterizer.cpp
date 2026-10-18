@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #ifndef _WIN32
+#include "bbport_null_resources.h"
 #include <dlfcn.h>
 #endif
 #include <map>
@@ -64,6 +65,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
+    BbNullResources::Init(instance);
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
@@ -2468,6 +2470,13 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
             host_buffers.emplace_back(host_buffer_info->buffer->Handle());
             host_offsets.push_back(host_buffer_info->offset + buffer.base_address -
                                    host_buffer_info->base_address);
+        } else if (BbNullResources::Needed()) {
+            // SacredFire Android: no null descriptors: an unbound stream reads zeros.
+            host_buffers.emplace_back(BbNullResources::Buffer());
+            host_offsets.push_back(0);
+            host_sizes.push_back(VK_WHOLE_SIZE);
+            host_strides.push_back(buffer.GetStride());
+            continue;
         } else {
             host_buffers.emplace_back(VK_NULL_HANDLE);
             host_offsets.push_back(0);
@@ -2769,7 +2778,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 // Permutations compiled without enabled planes never read the buffer, so the
                 // declared binding is satisfied with a null descriptor instead of a copy.
                 if (Regs().clipper_control.user_clip_plane_enable == 0) {
-                    buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
+                    buffer_infos.emplace_back(BbNullResources::OrNull(vk::Buffer{}), 0, VK_WHOLE_SIZE);
                 } else {
                     auto& vk_buffer = buffer_cache.GetStreamBuffer();
                     std::array<float, AmdGpu::NUM_CLIP_PLANES * 4> planes{};
@@ -2832,7 +2841,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
             }
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
-                buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
+                buffer_infos.emplace_back(BbNullResources::OrNull(vk::Buffer{}), 0, VK_WHOLE_SIZE);
             } else {
                 const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
                 if (size != vsharp.GetSize()) {
@@ -3080,7 +3089,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         const auto& desc = *desc_ptr;
         bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
         if (!image_id) {
-            image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
+            // SacredFire Android: a stand-in view without null descriptors.
+            vk::ImageView null_view{};
+            if (BbNullResources::Needed()) {
+                const auto t = desc.view_info.type;
+                null_view = BbNullResources::ImageView(
+                    t == AmdGpu::ImageType::Color3D ? vk::ImageViewType::e3D
+                    : (t == AmdGpu::ImageType::Color2DArray || t == AmdGpu::ImageType::Color1DArray)
+                        ? vk::ImageViewType::e2DArray
+                        : vk::ImageViewType::e2D);
+            }
+            image_infos.emplace_back(VK_NULL_HANDLE, null_view, vk::ImageLayout::eGeneral);
         } else {
             if (auto& old_image = texture_cache.GetImage(image_id);
                 old_image.binding.needs_rebind) {
@@ -3328,6 +3347,9 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
     for (u32 i = 0; i < count; ++i) {
         const auto& entry = set.entries[i];
         if (!entry.id) {
+            if (BbNullResources::Needed()) {
+                return false; // SacredFire Android: BindTextures picks the stand-in's type
+            }
             continue;
         }
         const auto& image = texture_cache.GetImage(entry.id);

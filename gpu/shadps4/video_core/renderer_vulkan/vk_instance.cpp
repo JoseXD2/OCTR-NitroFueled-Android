@@ -280,9 +280,27 @@ bool Instance::CreateDevice() {
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-    ASSERT_MSG(add_extension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME),
+    // SacredFire Android: the KHR extension (same feature structure) on drivers without the EXT
+    // one (Mali).
+    ASSERT_MSG(add_extension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) ||
+                   add_extension(VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}",
                VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+#ifdef BB_ANDROID
+    // SacredFire Android: robustness2 is optional (Mali has none): core robustBufferAccess and
+    // stand-ins for null descriptors (gpu/shim/bbport_null_resources) instead.
+    robustness2 = add_extension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    if (robustness2) {
+        const auto robustness2_features =
+            feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
+        robustness2_buffer = robustness2_features.robustBufferAccess2;
+        robustness2_image = robustness2_features.robustImageAccess2;
+        null_descriptor = robustness2_features.nullDescriptor;
+    } else {
+        robustness2_buffer = robustness2_image = null_descriptor = false;
+    }
+    LOG_INFO(Render_Vulkan, "- robustness2: {} (nullDescriptor {})", robustness2, null_descriptor);
+#else
     ASSERT_MSG(add_extension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
@@ -293,6 +311,7 @@ bool Instance::CreateDevice() {
                "Required Vulkan feature unavailable: robustImageAccess2");
     ASSERT_MSG(robustness2_features.nullDescriptor,
                "Required Vulkan feature unavailable: nullDescriptor");
+#endif
 
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
@@ -560,9 +579,9 @@ bool Instance::CreateDevice() {
             .depthClipEnable = true,
         },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
-            .robustBufferAccess2 = true,
-            .robustImageAccess2 = true,
-            .nullDescriptor = true,
+            .robustBufferAccess2 = robustness2_buffer,
+            .robustImageAccess2 = robustness2_image,
+            .nullDescriptor = null_descriptor,
         },
         vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{
             .vertexInputDynamicState = true,
@@ -636,6 +655,9 @@ bool Instance::CreateDevice() {
         },
     };
 
+    if (!robustness2) {
+        device_chain.unlink<vk::PhysicalDeviceRobustness2FeaturesEXT>();
+    }
     if (!custom_border_color) {
         device_chain.unlink<vk::PhysicalDeviceCustomBorderColorFeaturesEXT>();
     }
