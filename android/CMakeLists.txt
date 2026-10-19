@@ -19,7 +19,7 @@ file(GLOB BB_ATRAC9 CONFIGURE_DEPENDS ${BB_ROOT}/third_party/LibAtrac9/C/src/*.c
 add_library(atrac9 STATIC ${BB_ATRAC9})
 target_compile_options(atrac9 PRIVATE -w)
 set_target_properties(atrac9 PROPERTIES C_STANDARD 99)
-add_library(sacredfire SHARED ${BB_ROOT}/src/probe.c ${BB_RUNTIME} app/bb_android_main.c app/bb_guest_call.c)
+add_library(sacredfire SHARED ${BB_ROOT}/src/probe.c ${BB_RUNTIME} app/bb_android_main.c app/bb_guest_call.c app/bb_lzma.c)
 set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
 target_compile_definitions(sacredfire PRIVATE BB_ANDROID=1 _GNU_SOURCE)
 target_compile_options(sacredfire PRIVATE -include ${BB_ARM_COMPAT_DIR}/bb_arm_compat.h -Wall -Wextra

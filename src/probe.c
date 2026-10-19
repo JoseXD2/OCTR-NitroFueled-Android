@@ -838,6 +838,26 @@ int main(int argc, char **argv) {
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
     if (!cpu_only) bbgpu_patch_image(image, size);
+#ifdef BB_ANDROID
+    {
+        /* Hot guest functions replaced by native ARM64 copies (Box64 runs them several times
+         * slower): the entry becomes `jmp [rip+0]` to a bridge. BB_NATIVE_LZMA=0 keeps the game's
+         * LZMA decoder (android/app/bb_lzma.c). */
+        extern int bb_lzma_decode_real2(void *decoder, size_t limit, const uint8_t *bufLimit);
+        static const unsigned char lzma_entry[14] = {0x55,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x30};
+        const char *lzma = getenv("BB_NATIVE_LZMA");
+        const uint64_t at = 0x15835d0;
+        if ((!lzma || lzma[0] != '0') && at + sizeof lzma_entry <= size && !memcmp(image + at, lzma_entry, sizeof lzma_entry)) {
+            const uint64_t bridge = (uint64_t)(uintptr_t)bbx_bridge_sig((const void *)bb_lzma_decode_real2, "LzmaDec_DecodeReal2", "iFpLp");
+            unsigned char jump[14] = {0xff, 0x25, 0, 0, 0, 0};
+            memcpy(jump + 6, &bridge, 8);
+            memcpy(image + at, jump, sizeof jump);
+            printf("Native: LzmaDec_DecodeReal2 (+%#" PRIx64 ") runs as ARM64 code\n", at);
+        } else {
+            printf("Native: LZMA decoder left to the game (%s)\n", lzma && lzma[0] == '0' ? "BB_NATIVE_LZMA=0" : "code differs");
+        }
+    }
+#endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
