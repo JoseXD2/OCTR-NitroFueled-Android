@@ -13,6 +13,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "bbport_toggles.h"
+#include "bbport_bc_decode.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -1041,6 +1042,10 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
             }
             break;
         default:
+            // bbport: BC without BC support (Mali) is decoded on upload (bbport_bc_decode).
+            if (const auto decoded = BbBcDecode::Substitute(format); decoded != format) {
+                return decoded;
+            }
             break;
         }
     }

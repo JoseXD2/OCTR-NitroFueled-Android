@@ -7,6 +7,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
+#include "bbport_bc_decode.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -284,6 +285,27 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
     }
     if (needs_flush) {
         FlushBarriers();
+    }
+
+    if (dst->bc_decode) {
+        // bbport: no BC support (Mali): decode the blocks into texels, then copy those.
+        std::vector<vk::BufferImageCopy> decoded;
+        const vk::Buffer texels = BbBcDecode::Record(instance, scheduler, src->Handle(),
+                                                     dst->bc_decode, upload_copies, decoded);
+        scheduler.Record([texels, image = dst->GetImage(),
+                          regions = scheduler.RecordData(std::span<const vk::BufferImageCopy>{
+                              decoded})](vk::CommandBuffer cmdbuf) {
+            cmdbuf.copyBufferToImage(texels, image, vk::ImageLayout::eTransferDstOptimal,
+                                     regions.size(), regions.data());
+        });
+        for (const auto& copy : upload_copies) {
+            const auto copy_size = BufferImageCopySize(copy, dst->info.pixel_format);
+            AccessBuffer(src, copy.bufferOffset, copy_size,
+                         vk::PipelineStageFlagBits2::eComputeShader,
+                         vk::AccessFlagBits2::eShaderStorageRead);
+        }
+        dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+        return;
     }
 
     scheduler.Record([src_handle = src->Handle(), image = dst->GetImage(),

@@ -10,6 +10,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
+#include "bbport_bc_decode.h"
 
 #include <vk_mem_alloc.h>
 
@@ -172,6 +173,11 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
 
     constexpr auto tiling = vk::ImageTiling::eOptimal;
     const auto supported_format = instance.GetSupportedFormat(info.pixel_format, format_features);
+    // bbport: BC images stored decoded (no BC support, Mali) are plain images.
+    bc_decode = BbBcDecode::FormatId(info.pixel_format, supported_format);
+    if (bc_decode) {
+        flags &= ~vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
+    }
     vk::PhysicalDeviceImageFormatInfo2 format_info{
         .format = supported_format,
         .type = ConvertImageType(info.type),

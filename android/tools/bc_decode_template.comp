@@ -1,0 +1,392 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// SacredFire Android: BC1-BC7 blocks decoded into plain texels, for GPUs without BC textures
+// (Mali). One invocation per 4x4 block; the output rows are padded to whole blocks. The decoding
+// follows bcdec (https://github.com/iOrange/bcdec, MIT/Unlicense), BC6H mode tables included.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : disable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint src[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint dst[]; };
+
+layout(push_constant) uniform Params {
+    uint src_off;        // words
+    uint dst_off;        // words
+    uint blocks_x;
+    uint blocks_y;
+    uint num_z;          // layers * depth
+    uint src_row_words;  // between block rows
+    uint src_slice_words;
+    uint format;         // see BC_* below
+} p;
+
+#define BC1 1u
+#define BC1_OPAQUE 11u
+#define BC2 2u
+#define BC3 3u
+#define BC4U 4u
+#define BC4S 5u
+#define BC5U 6u
+#define BC5S 7u
+#define BC6U 8u
+#define BC6S 9u
+#define BC7 10u
+
+//TABLES//
+
+// ---- 128-bit little-endian bitstream ----
+uint bs[4];
+uint rb(int n) {
+    if (n <= 0) return 0u;
+    uint bits = bs[0] & ((1u << uint(n)) - 1u);
+    bs[0] = (bs[0] >> uint(n)) | (bs[1] << uint(32 - n));
+    bs[1] = (bs[1] >> uint(n)) | (bs[2] << uint(32 - n));
+    bs[2] = (bs[2] >> uint(n)) | (bs[3] << uint(32 - n));
+    bs[3] = bs[3] >> uint(n);
+    return bits;
+}
+uint rbr(int n) {
+    uint bits = rb(n), result = 0u;
+    for (int i = 0; i < n; ++i) { result = (result << 1u) | (bits & 1u); bits >>= 1u; }
+    return result;
+}
+
+// ---- BC1-BC5 ----
+uint pack_rgba(uint r, uint g, uint b, uint a) { return r | (g << 8u) | (b << 16u) | (a << 24u); }
+
+void color_block(uint w0, uint w1, bool only_opaque, bool opaque_alpha, out uint colors[16]) {
+    uint c0 = w0 & 0xFFFFu, c1 = w0 >> 16u;
+    uint r0 = (c0 >> 11u) & 0x1Fu, g0 = (c0 >> 5u) & 0x3Fu, b0 = c0 & 0x1Fu;
+    uint r1 = (c1 >> 11u) & 0x1Fu, g1 = (c1 >> 5u) & 0x3Fu, b1 = c1 & 0x1Fu;
+    uint ref[4];
+    ref[0] = pack_rgba((r0 * 527u + 23u) >> 6u, (g0 * 259u + 33u) >> 6u, (b0 * 527u + 23u) >> 6u, 255u);
+    ref[1] = pack_rgba((r1 * 527u + 23u) >> 6u, (g1 * 259u + 33u) >> 6u, (b1 * 527u + 23u) >> 6u, 255u);
+    if (c0 > c1 || only_opaque) {
+        ref[2] = pack_rgba(((2u * r0 + r1) * 351u + 61u) >> 7u, ((2u * g0 + g1) * 2763u + 1039u) >> 11u,
+                           ((2u * b0 + b1) * 351u + 61u) >> 7u, 255u);
+        ref[3] = pack_rgba(((r0 + r1 * 2u) * 351u + 61u) >> 7u, ((g0 + g1 * 2u) * 2763u + 1039u) >> 11u,
+                           ((b0 + b1 * 2u) * 351u + 61u) >> 7u, 255u);
+    } else {
+        ref[2] = pack_rgba(((r0 + r1) * 1053u + 125u) >> 8u, ((g0 + g1) * 4145u + 1019u) >> 11u,
+                           ((b0 + b1) * 1053u + 125u) >> 8u, 255u);
+        ref[3] = opaque_alpha ? 0xFF000000u : 0u;
+    }
+    for (uint t = 0u; t < 16u; ++t) colors[t] = ref[(w1 >> (2u * t)) & 3u];
+}
+
+// BC3 alpha / BC4 / BC5 channel: 8 bytes (two words) -> 16 values (0..255, or -127..127 signed)
+void smooth_block(uint w0, uint w1, bool is_signed, out int v[16]) {
+    int a0, a1;
+    if (is_signed) {
+        a0 = max(int(w0 << 24u) >> 24, -127);
+        a1 = max(int(w0 << 16u) >> 24, -127);
+    } else {
+        a0 = int(w0 & 0xFFu);
+        a1 = int((w0 >> 8u) & 0xFFu);
+    }
+    int pal[8];
+    pal[0] = a0;
+    pal[1] = a1;
+    if (a0 > a1) {
+        for (int i = 1; i < 7; ++i) pal[i + 1] = ((7 - i) * a0 + i * a1) / 7;
+    } else {
+        for (int i = 1; i < 5; ++i) pal[i + 1] = ((5 - i) * a0 + i * a1) / 5;
+        pal[6] = is_signed ? -127 : 0;
+        pal[7] = is_signed ? 127 : 255;
+    }
+    // 48 index bits: 16 in w0's high half, 32 in w1.
+    for (uint t = 0u; t < 16u; ++t) {
+        uint bit = 16u + 3u * t;
+        uint idx;
+        if (bit + 3u <= 32u) idx = (w0 >> bit) & 7u;
+        else if (bit >= 32u) idx = (w1 >> (bit - 32u)) & 7u;
+        else idx = ((w0 >> bit) | (w1 << (32u - bit))) & 7u;
+        v[t] = pal[idx];
+    }
+}
+
+// ---- BC6H ----
+int extend_sign(int val, int bits) { return (val << (32 - bits)) >> (32 - bits); }
+int transform_inverse(int val, int a0, int bits, bool is_signed) {
+    val = (val + a0) & ((1 << bits) - 1);
+    return is_signed ? extend_sign(val, bits) : val;
+}
+int unquantize(int val, int bits, bool is_signed) {
+    int unq;
+    if (!is_signed) {
+        if (bits >= 15) unq = val;
+        else if (val == 0) unq = 0;
+        else if (val == ((1 << bits) - 1)) unq = 0xFFFF;
+        else unq = ((val << 16) + 0x8000) >> bits;
+    } else {
+        if (bits >= 16) unq = val;
+        else {
+            bool s = val < 0;
+            if (s) val = -val;
+            if (val == 0) unq = 0;
+            else if (val >= ((1 << (bits - 1)) - 1)) unq = 0x7FFF;
+            else unq = ((val << 15) + 0x4000) >> (bits - 1);
+            if (s) unq = -unq;
+        }
+    }
+    return unq;
+}
+uint finish_unquantize(int val, bool is_signed) {
+    if (!is_signed) return uint((val * 31) >> 6);
+    val = (val < 0) ? -(((-val) * 31) >> 5) : (val * 31) >> 5;
+    uint s = 0u;
+    if (val < 0) { s = 0x8000u; val = -val; }
+    return s | uint(val);
+}
+const int BC6_BITS[56] = int[](10, 7, 11, 11, 11, 9, 8, 8, 8, 6, 10, 11, 12, 16,
+                               5, 6, 5, 4, 4, 5, 6, 5, 5, 6, 10, 9, 8, 4,
+                               5, 6, 4, 5, 4, 5, 5, 6, 5, 6, 10, 9, 8, 4,
+                               5, 6, 4, 4, 5, 5, 5, 5, 6, 6, 10, 9, 8, 4);
+const int W3[8] = int[](0, 9, 18, 27, 37, 46, 55, 64);
+const int W4[16] = int[](0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64);
+const int W2[4] = int[](0, 21, 43, 64);
+int interp(int a, int b, int w) { return (a * (64 - w) + b * w + 32) >> 6; }
+
+// out: 16 texels x 2 words (R16G16, B16A16)
+void bc6h_block(bool is_signed, out uint outv[32]) {
+    int r[4] = int[](0, 0, 0, 0), g[4] = int[](0, 0, 0, 0), b[4] = int[](0, 0, 0, 0);
+    int mode = int(rb(2));
+    if (mode > 1) mode |= int(rb(3)) << 2;
+    int part_id = 0;
+    bool valid = true;
+//BC6H_MODES//
+    if (!valid) {
+        for (int t = 0; t < 32; ++t) outv[t] = (t & 1) == 1 ? 0x3C000000u : 0u;
+        return;
+    }
+    int num_partitions = (mode >= 10) ? 0 : 1;
+    int bits0 = BC6_BITS[mode];
+    if (is_signed) {
+        r[0] = extend_sign(r[0], bits0);
+        g[0] = extend_sign(g[0], bits0);
+        b[0] = extend_sign(b[0], bits0);
+    }
+    if ((mode != 9 && mode != 10) || is_signed) {
+        for (int i = 1; i < (num_partitions + 1) * 2; ++i) {
+            r[i] = extend_sign(r[i], BC6_BITS[14 + mode]);
+            g[i] = extend_sign(g[i], BC6_BITS[28 + mode]);
+            b[i] = extend_sign(b[i], BC6_BITS[42 + mode]);
+        }
+    }
+    if (mode != 9 && mode != 10) {
+        for (int i = 1; i < (num_partitions + 1) * 2; ++i) {
+            r[i] = transform_inverse(r[i], r[0], bits0, is_signed);
+            g[i] = transform_inverse(g[i], g[0], bits0, is_signed);
+            b[i] = transform_inverse(b[i], b[0], bits0, is_signed);
+        }
+    }
+    for (int i = 0; i < (num_partitions + 1) * 2; ++i) {
+        r[i] = unquantize(r[i], bits0, is_signed);
+        g[i] = unquantize(g[i], bits0, is_signed);
+        b[i] = unquantize(b[i], bits0, is_signed);
+    }
+    for (int t = 0; t < 16; ++t) {
+        int subset = 0;
+        int index_bits = (mode >= 10) ? 4 : 3;
+        if (mode >= 10) {
+            if (t == 0) index_bits--;
+        } else {
+            subset = int((P2_SUBSETS[part_id] >> (2u * uint(t))) & 1u);
+            if (((P2_ANCHORS[part_id] >> uint(t)) & 1u) != 0u) index_bits--;
+        }
+        int index = int(rb(index_bits));
+        int w = (mode >= 10) ? W4[index] : W3[index];
+        int ep = subset * 2;
+        uint hr = finish_unquantize(interp(r[ep], r[ep + 1], w), is_signed);
+        uint hg = finish_unquantize(interp(g[ep], g[ep + 1], w), is_signed);
+        uint hb = finish_unquantize(interp(b[ep], b[ep + 1], w), is_signed);
+        outv[2 * t] = hr | (hg << 16u);
+        outv[2 * t + 1] = hb | (0x3C00u << 16u);
+    }
+}
+
+// ---- BC7 ----
+const int BC7_BITS_RGB[8] = int[](4, 6, 5, 7, 5, 7, 7, 5);
+const int BC7_BITS_A[8] = int[](0, 0, 0, 0, 6, 8, 7, 5);
+const uint BC7_PBITS = 0xCBu; // 0b11001011
+
+void bc7_block(out uint colors[16]) {
+    int mode = 0;
+    while (mode < 8 && rb(1) == 0u) ++mode;
+    if (mode >= 8) {
+        for (int t = 0; t < 16; ++t) colors[t] = 0u;
+        return;
+    }
+    int part_id = 0, num_partitions = 1, rotation = 0, isb = 0;
+    if (mode == 0 || mode == 1 || mode == 2 || mode == 3 || mode == 7) {
+        num_partitions = (mode == 0 || mode == 2) ? 3 : 2;
+        part_id = int(rb((mode == 0) ? 4 : 6));
+    }
+    int num_endpoints = num_partitions * 2;
+    if (mode == 4 || mode == 5) {
+        rotation = int(rb(2));
+        if (mode == 4) isb = int(rb(1));
+    }
+    ivec4 ep[6];
+    for (int j = 0; j < 6; ++j) ep[j] = ivec4(0);
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < num_endpoints; ++j) ep[j][i] = int(rb(BC7_BITS_RGB[mode]));
+    if (BC7_BITS_A[mode] > 0)
+        for (int j = 0; j < num_endpoints; ++j) ep[j][3] = int(rb(BC7_BITS_A[mode]));
+    if (mode == 0 || mode == 1 || mode == 3 || mode == 6 || mode == 7) {
+        for (int i = 0; i < num_endpoints; ++i) ep[i] <<= 1;
+        if (mode == 1) {
+            int i0 = int(rb(1)), j0 = int(rb(1));
+            for (int k = 0; k < 3; ++k) {
+                ep[0][k] |= i0; ep[1][k] |= i0;
+                ep[2][k] |= j0; ep[3][k] |= j0;
+            }
+        } else if ((BC7_PBITS & (1u << uint(mode))) != 0u) {
+            for (int i = 0; i < num_endpoints; ++i) {
+                int pb = int(rb(1));
+                ep[i] |= ivec4(pb);
+            }
+        }
+    }
+    int pbit = int((BC7_PBITS >> uint(mode)) & 1u);
+    for (int i = 0; i < num_endpoints; ++i) {
+        int j = BC7_BITS_RGB[mode] + pbit;
+        for (int k = 0; k < 3; ++k) {
+            ep[i][k] = ep[i][k] << (8 - j);
+            ep[i][k] = ep[i][k] | (ep[i][k] >> j);
+        }
+        j = BC7_BITS_A[mode] + pbit;
+        ep[i][3] = ep[i][3] << (8 - j);
+        ep[i][3] = ep[i][3] | (ep[i][3] >> j);
+    }
+    if (BC7_BITS_A[mode] == 0)
+        for (int j = 0; j < num_endpoints; ++j) ep[j][3] = 0xFF;
+    int index_bits = (mode == 0 || mode == 1) ? 3 : ((mode == 6) ? 4 : 2);
+    int index_bits2 = (mode == 4) ? 3 : ((mode == 5) ? 2 : 0);
+    int subsets[16], indices[16];
+    for (int t = 0; t < 16; ++t) {
+        int subset = 0;
+        bool anchor = t == 0;
+        if (num_partitions == 2) {
+            subset = int((P2_SUBSETS[part_id] >> (2u * uint(t))) & 3u);
+            anchor = ((P2_ANCHORS[part_id] >> uint(t)) & 1u) != 0u;
+        } else if (num_partitions == 3) {
+            subset = int((P3_SUBSETS[part_id] >> (2u * uint(t))) & 3u);
+            anchor = ((P3_ANCHORS[part_id] >> uint(t)) & 1u) != 0u;
+        }
+        subsets[t] = subset;
+        indices[t] = int(rb(anchor ? index_bits - 1 : index_bits));
+    }
+    for (int t = 0; t < 16; ++t) {
+        int s = subsets[t] * 2;
+        int index = indices[t];
+        int w = index_bits == 2 ? W2[index] : (index_bits == 3 ? W3[index] : W4[index]);
+        int r, g, b, a;
+        if (index_bits2 == 0) {
+            r = interp(ep[s][0], ep[s + 1][0], w);
+            g = interp(ep[s][1], ep[s + 1][1], w);
+            b = interp(ep[s][2], ep[s + 1][2], w);
+            a = interp(ep[s][3], ep[s + 1][3], w);
+        } else {
+            int index2 = int(rb(t != 0 ? index_bits2 : index_bits2 - 1));
+            int w2 = index_bits2 == 2 ? W2[index2] : W3[index2];
+            if (isb == 0) {
+                r = interp(ep[s][0], ep[s + 1][0], w);
+                g = interp(ep[s][1], ep[s + 1][1], w);
+                b = interp(ep[s][2], ep[s + 1][2], w);
+                a = interp(ep[s][3], ep[s + 1][3], w2);
+            } else {
+                r = interp(ep[s][0], ep[s + 1][0], w2);
+                g = interp(ep[s][1], ep[s + 1][1], w2);
+                b = interp(ep[s][2], ep[s + 1][2], w2);
+                a = interp(ep[s][3], ep[s + 1][3], w);
+            }
+        }
+        int tmp;
+        if (rotation == 1) { tmp = a; a = r; r = tmp; }
+        else if (rotation == 2) { tmp = a; a = g; g = tmp; }
+        else if (rotation == 3) { tmp = a; a = b; b = tmp; }
+        colors[t] = pack_rgba(uint(r), uint(g), uint(b), uint(a));
+    }
+}
+
+void main() {
+    const uvec3 id = gl_GlobalInvocationID;
+    if (id.x >= p.blocks_x || id.y >= p.blocks_y || id.z >= p.num_z) return;
+    const uint f = p.format;
+    const bool big = f == BC2 || f == BC3 || f == BC5U || f == BC5S || f == BC6U || f == BC6S || f == BC7;
+    const uint block_words = big ? 4u : 2u;
+    const uint s = p.src_off + id.z * p.src_slice_words + id.y * p.src_row_words + id.x * block_words;
+    uint w[4];
+    w[0] = src[s];
+    w[1] = src[s + 1u];
+    w[2] = big ? src[s + 2u] : 0u;
+    w[3] = big ? src[s + 3u] : 0u;
+    const uint row_texels = p.blocks_x * 4u;
+    const uint slice_texels = row_texels * p.blocks_y * 4u;
+
+    if (f == BC4U || f == BC4S) {
+        // R8: one word per block row
+        int v[16];
+        smooth_block(w[0], w[1], f == BC4S, v);
+        const uint base = p.dst_off + (id.z * slice_texels + id.y * 4u * row_texels) / 4u + id.x;
+        for (uint y = 0u; y < 4u; ++y) {
+            uint word = 0u;
+            for (uint x = 0u; x < 4u; ++x) word |= (uint(v[y * 4u + x]) & 0xFFu) << (8u * x);
+            dst[base + y * (row_texels / 4u)] = word;
+        }
+        return;
+    }
+    if (f == BC5U || f == BC5S) {
+        // RG8: two words per block row
+        int vr[16], vg[16];
+        smooth_block(w[0], w[1], f == BC5S, vr);
+        smooth_block(w[2], w[3], f == BC5S, vg);
+        const uint base = p.dst_off + (id.z * slice_texels + id.y * 4u * row_texels) / 2u + id.x * 2u;
+        for (uint y = 0u; y < 4u; ++y) {
+            for (uint h = 0u; h < 2u; ++h) {
+                uint t0 = y * 4u + h * 2u;
+                uint word = (uint(vr[t0]) & 0xFFu) | ((uint(vg[t0]) & 0xFFu) << 8u) |
+                            ((uint(vr[t0 + 1u]) & 0xFFu) << 16u) | ((uint(vg[t0 + 1u]) & 0xFFu) << 24u);
+                dst[base + y * (row_texels / 2u) + h] = word;
+            }
+        }
+        return;
+    }
+    if (f == BC6U || f == BC6S) {
+        bs[0] = w[0]; bs[1] = w[1]; bs[2] = w[2]; bs[3] = w[3];
+        uint hv[32];
+        bc6h_block(f == BC6S, hv);
+        const uint base = p.dst_off + (id.z * slice_texels + id.y * 4u * row_texels + id.x * 4u) * 2u;
+        for (uint y = 0u; y < 4u; ++y)
+            for (uint x = 0u; x < 4u; ++x) {
+                const uint t = y * 4u + x;
+                dst[base + (y * row_texels + x) * 2u] = hv[2u * t];
+                dst[base + (y * row_texels + x) * 2u + 1u] = hv[2u * t + 1u];
+            }
+        return;
+    }
+    uint colors[16];
+    if (f == BC7) {
+        bs[0] = w[0]; bs[1] = w[1]; bs[2] = w[2]; bs[3] = w[3];
+        bc7_block(colors);
+    } else if (f == BC1 || f == BC1_OPAQUE) {
+        color_block(w[0], w[1], false, f == BC1_OPAQUE, colors);
+    } else {
+        color_block(w[2], w[3], true, false, colors);
+        if (f == BC2) {
+            for (uint t = 0u; t < 16u; ++t) {
+                uint a = ((t < 8u ? w[0] >> (4u * t) : w[1] >> (4u * (t - 8u))) & 0xFu) * 17u;
+                colors[t] = (colors[t] & 0x00FFFFFFu) | (a << 24u);
+            }
+        } else {
+            int av[16];
+            smooth_block(w[0], w[1], false, av);
+            for (uint t = 0u; t < 16u; ++t) colors[t] = (colors[t] & 0x00FFFFFFu) | (uint(av[t]) << 24u);
+        }
+    }
+    const uint base = p.dst_off + id.z * slice_texels + id.y * 4u * row_texels + id.x * 4u;
+    for (uint y = 0u; y < 4u; ++y)
+        for (uint x = 0u; x < 4u; ++x) dst[base + y * row_texels + x] = colors[y * 4u + x];
+}

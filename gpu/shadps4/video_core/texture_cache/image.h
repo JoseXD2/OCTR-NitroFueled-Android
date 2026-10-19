@@ -102,6 +102,8 @@ struct Image {
         return image_addr < overlap_end && overlap_cpu_addr < image_end;
     }
 
+    u32 bc_decode{}; ///< bbport: BbBcDecode format id when BC blocks are decoded on upload
+
     vk::Image GetImage() const {
         return backing->image.image;
     }
