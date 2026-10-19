@@ -12,6 +12,13 @@
 #define _GNU_SOURCE
 #include <android/native_activity.h>
 #include <dirent.h>
+#include <sched.h>
+#include <dlfcn.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
@@ -22,6 +29,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "sdl_android.h"
+#include "bb_box64.h"
 
 int bb_probe_main(int argc, char **argv);
 
@@ -122,7 +130,7 @@ static void load_env_file(const char *path) {
 
 /* Every 5 s: the threads that used the most CPU (BB_THREAD_STATS=0 turns it off). Shows whether
  * a slow game is bound by one guest thread (Box64), the GPU thread or the driver. */
-struct thread_sample { int tid; unsigned long long ticks; char name[32]; };
+struct thread_sample { int tid; int cpu; unsigned long long ticks; char name[32]; };
 static int read_threads(struct thread_sample *out, int max) {
     DIR *dir = opendir("/proc/self/task");
     if (!dir) return 0;
@@ -149,20 +157,158 @@ static int read_threads(struct thread_sample *out, int max) {
         /* after ")": state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime */
         if (sscanf(close + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2) continue;
         t->ticks = ut + st;
+        /* field 39 (processor): the 37th after ")" */
+        t->cpu = -1;
+        {
+            const char *q = close + 2;
+            for (int field = 3; field < 39 && q; ++field) {
+                q = strchr(q, ' ');
+                if (q) ++q;
+            }
+            if (q) t->cpu = atoi(q);
+        }
         ++n;
     }
     closedir(dir);
     return n;
 }
+/* The busiest threads are sampled (SIGPROF every 2 ms) to show where they run: a guest
+ * address (+offset in the game image, from Box64's dynarec blocks) or a host function. */
+unsigned char *bb_guest_image(void);
+enum { SAMPLE_MAX = 16384, SAMPLED_THREADS = 4 };
+static struct { int tid; uintptr_t pc, lr; } samples[SAMPLE_MAX];
+static atomic_int sample_count;
+static void sample_handler(int sig, siginfo_t *info, void *context) {
+    (void)sig; (void)info;
+    const int i = atomic_fetch_add(&sample_count, 1);
+    if (i >= SAMPLE_MAX) return;
+    const ucontext_t *uc = (const ucontext_t *)context;
+    samples[i].tid = (int)syscall(SYS_gettid);
+    samples[i].pc = (uintptr_t)uc->uc_mcontext.pc;
+    samples[i].lr = (uintptr_t)uc->uc_mcontext.regs[30];
+}
+static int describe_pc(uintptr_t pc, char *out, size_t size) {
+    const uintptr_t guest = bbx_guest_pc(pc);
+    const uintptr_t base = (uintptr_t)bb_guest_image();
+    if (guest) {
+        if (base && guest >= base && guest < base + 0x6000000) return snprintf(out, size, "+%#lx", (unsigned long)(guest - base));
+        return snprintf(out, size, "g%#lx", (unsigned long)guest);
+    }
+    Dl_info dl = {0};
+    if (dladdr((void *)pc, &dl) && dl.dli_fname) {
+        const char *module = strrchr(dl.dli_fname, '/');
+        module = module ? module + 1 : dl.dli_fname;
+        if (dl.dli_sname) return snprintf(out, size, "%s:%s+%#lx", module, dl.dli_sname, (unsigned long)(pc - (uintptr_t)dl.dli_saddr));
+        return snprintf(out, size, "%s+%#lx", module, (unsigned long)(pc - (uintptr_t)dl.dli_fbase));
+    }
+    return snprintf(out, size, "?%#lx", (unsigned long)pc);
+}
+static int cmp_desc(const void *a, const void *b) {
+    const int x = *(const int *)a, y = *(const int *)b;
+    return (y >> 16) - (x >> 16);
+}
+static void sample_report(const int *tids, char names[][32], int n) {
+    int total = atomic_exchange(&sample_count, 0);
+    if (total > SAMPLE_MAX) total = SAMPLE_MAX;
+    for (int t = 0; t < n; ++t) {
+        /* distinct (pc description) counts for this thread */
+        static char keys[256][96];
+        static int counts[256];
+        int nk = 0, all = 0;
+        for (int i = 0; i < total; ++i) {
+            if (samples[i].tid != tids[t]) continue;
+            char key[96];
+            int len = describe_pc(samples[i].pc, key, sizeof key);
+            if (!bbx_guest_pc(samples[i].pc) && len < (int)sizeof key - 8) {
+                key[len++] = '<';
+                describe_pc(samples[i].lr, key + len, sizeof key - len);
+            }
+            ++all;
+            int k = 0;
+            while (k < nk && strcmp(keys[k], key)) ++k;
+            if (k == nk) {
+                if (nk == 256) continue;
+                strcpy(keys[nk], key);
+                counts[nk++] = 0;
+            }
+            ++counts[k];
+        }
+        if (!all) continue;
+        int order[256];
+        for (int k = 0; k < nk; ++k) order[k] = (counts[k] << 16) | k;
+        qsort(order, nk, sizeof *order, cmp_desc);
+        char line[1400];
+        int at = snprintf(line, sizeof line, "Samples %s (%d):", names[t], all);
+        for (int k = 0; k < nk && k < 8 && at < (int)sizeof line - 120; ++k) {
+            const int idx = order[k] & 0xffff;
+            at += snprintf(line + at, sizeof line - at, " %s %d%%", keys[idx], counts[idx] * 100 / all);
+        }
+        printf("%s\n", line);
+    }
+}
+
+/* All threads may run on every core: some phones start apps on the small cores only. */
+static void print_allowed(const char *when) {
+    char buf[4096];
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return;
+    while (fgets(buf, sizeof buf, f))
+        if (!strncmp(buf, "Cpus_allowed_list:", 18)) printf("CPU (%s): allowed %s", when, buf + 18);
+    fclose(f);
+    f = fopen("/proc/self/cpuset", "r");
+    if (f) {
+        if (fgets(buf, sizeof buf, f)) printf("CPU (%s): cpuset %s", when, buf);
+        fclose(f);
+    }
+}
+static void affinity_all(const struct thread_sample *threads, int n) {
+    static int reported;
+    cpu_set_t all;
+    CPU_ZERO(&all);
+    const long cpus = sysconf(_SC_NPROCESSORS_CONF);
+    for (long c = 0; c < cpus && c < CPU_SETSIZE; ++c) CPU_SET(c, &all);
+    int failed = 0;
+    for (int i = 0; i < n; ++i) {
+        cpu_set_t now;
+        if (sched_getaffinity(threads[i].tid, sizeof now, &now) == 0 && CPU_COUNT(&now) >= cpus) continue;
+        if (sched_setaffinity(threads[i].tid, sizeof all, &all)) ++failed;
+    }
+    if (failed && !reported) {
+        reported = 1;
+        printf("CPU: %d thread(s) could not be moved to all %ld cores (errno %d)\n", failed, cpus, errno);
+    }
+}
 static void *thread_stats_main(void *arg) {
     (void)arg;
+    print_allowed("start");
     enum { MAX = 512 };
     static struct thread_sample prev[MAX], cur[MAX];
     int np = read_threads(prev, MAX);
     const long hz = sysconf(_SC_CLK_TCK);
+    const int sampling = !getenv("BB_SAMPLE") || getenv("BB_SAMPLE")[0] != '0';
+    if (sampling) {
+        struct sigaction action = {0};
+        action.sa_sigaction = sample_handler;
+        action.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGPROF, &action, NULL);
+    }
+    int sampled[SAMPLED_THREADS], n_sampled = 0;
+    static char sampled_names[SAMPLED_THREADS][32];
     for (;;) {
-        sleep(5);
+        if (n_sampled) {
+            const pid_t pid = getpid();
+            for (int round = 0; round < 2500; ++round) {
+                for (int k = 0; k < n_sampled; ++k) syscall(SYS_tgkill, pid, sampled[k], SIGPROF);
+                struct timespec t = {0, 2000000};
+                nanosleep(&t, NULL);
+            }
+            sample_report(sampled, sampled_names, n_sampled);
+        } else {
+            sleep(5);
+        }
         int nc = read_threads(cur, MAX);
+        affinity_all(cur, nc);
         int top[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
         unsigned long long dt[MAX], total = 0;
         for (int i = 0; i < nc; ++i) {
@@ -181,9 +327,18 @@ static void *thread_stats_main(void *arg) {
         char line[1024];
         int at = snprintf(line, sizeof line, "CPU 5s: total %llu%%:", total * 100 / (5 * hz));
         for (int k = 0; k < 8 && top[k] >= 0 && at < (int)sizeof line - 64; ++k)
-            at += snprintf(line + at, sizeof line - at, " %s %llu%%", cur[top[k]].name,
-                           dt[top[k]] * 100 / (5 * hz));
+            at += snprintf(line + at, sizeof line - at, " %s %llu%% (cpu%d)", cur[top[k]].name,
+                           dt[top[k]] * 100 / (5 * hz), cur[top[k]].cpu);
         printf("%s\n", line);
+        static int cycles;
+        if (++cycles % 12 == 1) print_allowed("now");
+        n_sampled = 0;
+        for (int k = 0; sampling && k < 8 && top[k] >= 0 && n_sampled < SAMPLED_THREADS; ++k) {
+            if (dt[top[k]] * 100 / (5 * hz) < 25 || cur[top[k]].tid == (int)syscall(SYS_gettid)) continue;
+            sampled[n_sampled] = cur[top[k]].tid;
+            snprintf(sampled_names[n_sampled], sizeof sampled_names[0], "%s", cur[top[k]].name);
+            ++n_sampled;
+        }
         memcpy(prev, cur, sizeof(cur[0]) * nc);
         np = nc;
     }

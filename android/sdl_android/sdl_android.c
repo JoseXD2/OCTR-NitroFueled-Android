@@ -304,13 +304,17 @@ static SDL_Window the_window = {.id = 1};
 static bool window_created;
 static const SDL_DisplayID the_display = 1;
 
-static void window_size(int *w, int *h) {
-    pthread_mutex_lock(&app_lock);
+/* With app_lock held (the input thread handles events under it). */
+static void window_size_locked(int *w, int *h) {
     int ww = native_window ? ANativeWindow_getWidth(native_window) : 0;
     int hh = native_window ? ANativeWindow_getHeight(native_window) : 0;
-    pthread_mutex_unlock(&app_lock);
     if (w) *w = ww > 0 ? ww : 1920;
     if (h) *h = hh > 0 ? hh : 1080;
+}
+static void window_size(int *w, int *h) {
+    pthread_mutex_lock(&app_lock);
+    window_size_locked(w, h);
+    pthread_mutex_unlock(&app_lock);
 }
 
 SDL_DisplayID SDL_GetPrimaryDisplay(void) { return the_display; }
@@ -932,7 +936,7 @@ static void touch_up(int32_t pointer, float x, float y) {
 }
 static void touch_event(const AInputEvent *event) {
     int w, h;
-    window_size(&w, &h);
+    window_size_locked(&w, &h); /* app_lock is held: window_size() would deadlock (ANR) */
     const int32_t action = AMotionEvent_getAction(event);
     const int32_t masked = action & AMOTION_EVENT_ACTION_MASK;
     const size_t index = (size_t)((action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >>
