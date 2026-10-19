@@ -8,6 +8,11 @@
 #include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
+#ifdef BB_ANDROID
+#include <cstdio>
+#include <SDL3/SDL.h>
+#include "video_core/renderer_vulkan/vk_platform.h"
+#endif
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
@@ -36,6 +41,22 @@ void Swapchain::Create(u32 width_, u32 height_) {
     width = width_;
     height = height_;
     needs_recreation = false;
+#ifdef BB_ANDROID
+    // SacredFire Android: the activity gets a new ANativeWindow when it returns from the
+    // background; the old surface is dead (presenting black or failing), so a new one is made.
+    if (void* now = SDL_GetPointerProperty(SDL_GetWindowProperties(window.GetSDLWindow()),
+                                           SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+        now && now != android_window) {
+        if (android_window) {
+            Destroy();
+            swapchain = nullptr;
+            instance.GetInstance().destroySurfaceKHR(surface);
+            surface = CreateAndroidSurface(instance.GetInstance(), now);
+            std::printf("GPU: new Android surface (the app returned to the foreground)\n");
+        }
+        android_window = now;
+    }
+#endif
 
     // bbport: a minimised window has a 0x0 surface (issue #31); no swapchain can have that extent.
     // The old one stays (presents are skipped) until the window is back.
@@ -93,6 +114,16 @@ void Swapchain::Create(u32 width_, u32 height_) {
 
     SetupImages();
     RefreshSemaphores();
+}
+
+bool Swapchain::WindowChanged() const {
+#ifdef BB_ANDROID
+    void* now = SDL_GetPointerProperty(SDL_GetWindowProperties(window.GetSDLWindow()),
+                                       SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+    return now && android_window && now != android_window;
+#else
+    return false;
+#endif
 }
 
 void Swapchain::Recreate(u32 width_, u32 height_) {
@@ -153,7 +184,8 @@ bool Swapchain::Present() {
     };
 
     auto result = instance.GetPresentQueue().presentKHR(present_info);
-    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR ||
+        result == vk::Result::eErrorSurfaceLostKHR) {
         needs_recreation = true;
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",

@@ -22,6 +22,11 @@ namespace Vulkan {
 constexpr u32 TargetVulkanApiVersion = VK_API_VERSION_1_3;
 
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
+#ifdef BB_ANDROID
+/// SacredFire Android: a surface for the activity's current ANativeWindow (it changes when the app
+/// returns from the background).
+vk::SurfaceKHR CreateAndroidSurface(vk::Instance instance, void* native_window);
+#endif
 
 vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool enable_validation,
                                   bool enable_crash_diagnostic);

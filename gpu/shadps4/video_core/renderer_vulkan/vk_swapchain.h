@@ -56,8 +56,10 @@ public:
 
     /// bbport: false while the window is minimised (0x0 surface): frames are not presented.
     bool IsPresentable() const {
-        return !zero_extent && swapchain;
+        return !zero_extent && swapchain && !WindowChanged();
     }
+    /// SacredFire Android: the activity's window is not the one the surface was made for.
+    bool WindowChanged() const;
 
     u32 GetWidth() const {
         return width;
@@ -121,6 +123,7 @@ private:
     const Frontend::WindowSDL& window;
     vk::SwapchainKHR swapchain{};
     vk::SurfaceKHR surface{};
+    void* android_window{}; ///< SacredFire Android: the ANativeWindow `surface` was made for
     vk::SurfaceFormatKHR surface_format;
     vk::Format view_format;
     vk::PresentModeKHR present_mode;

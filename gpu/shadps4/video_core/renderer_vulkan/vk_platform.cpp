@@ -60,6 +60,20 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsCallback(
     return VK_FALSE;
 }
 
+#ifdef BB_ANDROID
+vk::SurfaceKHR CreateAndroidSurface(vk::Instance instance, void* native_window) {
+    const vk::AndroidSurfaceCreateInfoKHR android_ci = {
+        .window = static_cast<ANativeWindow*>(native_window),
+    };
+    vk::SurfaceKHR surface{};
+    if (instance.createAndroidSurfaceKHR(&android_ci, nullptr, &surface) != vk::Result::eSuccess) {
+        LOG_CRITICAL(Render_Vulkan, "Failed to initialize Android surface");
+        UNREACHABLE();
+    }
+    return surface;
+}
+#endif
+
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window) {
     const auto& window_info = emu_window.GetWindowInfo();
     vk::SurfaceKHR surface{};

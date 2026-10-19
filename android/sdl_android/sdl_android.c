@@ -190,6 +190,7 @@ static ANativeActivity *activity;
 static pthread_mutex_t app_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t app_cond = PTHREAD_COND_INITIALIZER;
 static ANativeWindow *native_window; /* under app_lock */
+static bool window_visible;          /* under app_lock: false while the app is in the background */
 static atomic_bool app_focused, app_paused;
 static char log_path[512];
 
@@ -370,7 +371,15 @@ void SDL_DestroyWindow(SDL_Window *window) {
 SDL_PropertiesID SDL_GetWindowProperties(SDL_Window *window) { return window ? window->props : 0; }
 bool SDL_GetWindowSizeInPixels(SDL_Window *window, int *w, int *h) {
     (void)window;
-    window_size(w, h);
+    /* 0x0 in the background: the renderer skips presenting (a minimised window). */
+    pthread_mutex_lock(&app_lock);
+    const bool visible = window_visible;
+    window_size_locked(w, h);
+    pthread_mutex_unlock(&app_lock);
+    if (!visible) {
+        if (w) *w = 0;
+        if (h) *h = 0;
+    }
     return true;
 }
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window *window) {
@@ -642,6 +651,11 @@ static Pad *virtual_pad(void) {
 static void pad_button(Pad *pad, SDL_GamepadButton button, bool down) {
     if (!pad || button < 0 || button >= SDL_GAMEPAD_BUTTON_COUNT || pad->buttons[button] == down) return;
     pad->buttons[button] = down;
+    static int logged;
+    if (down && logged < 40) { /* test builds: which buttons arrive */
+        ++logged;
+        printf("SDL (Android): %s button %d pressed\n", pad->name, (int)button);
+    }
     SDL_Event e = {0};
     e.gbutton.type = down ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
     e.gbutton.which = pad->id;
@@ -1061,20 +1075,36 @@ static void *input_thread(void *arg) {
 
 /* ---------------------------------------------------------------- activity callbacks */
 
+static void push_size_event(void) {
+    SDL_Event e = {0};
+    e.window.type = SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
+    e.window.windowID = the_window.id;
+    SDL_GetWindowSizeInPixels(&the_window, &e.window.data1, &e.window.data2);
+    push_event(&e);
+}
 static void on_window_created(ANativeActivity *a, ANativeWindow *window) {
     (void)a;
     pthread_mutex_lock(&app_lock);
-    if (native_window && native_window != window) ANativeWindow_release(native_window);
+    /* The old window stays referenced: the renderer may still hold a surface on it. */
     if (native_window != window) ANativeWindow_acquire(window);
     native_window = window;
+    window_visible = true;
     pthread_cond_broadcast(&app_cond);
     pthread_mutex_unlock(&app_lock);
+    /* The renderer makes a new surface for it (Swapchain::Create) at the next size change. */
+    if (window_created) {
+        SDL_SetPointerProperty(the_window.props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, window);
+        push_size_event();
+    }
     printf("SDL (Android): native window %dx%d\n", ANativeWindow_getWidth(window), ANativeWindow_getHeight(window));
 }
 static void on_window_destroyed(ANativeActivity *a, ANativeWindow *window) {
     (void)a;
-    /* The renderer keeps its reference (acquired above) until the app returns: presenting fails
-     * while in the background. */
+    pthread_mutex_lock(&app_lock);
+    window_visible = false;
+    pthread_mutex_unlock(&app_lock);
+    /* 0x0 until the app returns: nothing is presented meanwhile. */
+    if (window_created) push_size_event();
     printf("SDL (Android): native window %p destroyed (app in the background)\n", (void *)window);
 }
 static void on_window_resized(ANativeActivity *a, ANativeWindow *window) {
