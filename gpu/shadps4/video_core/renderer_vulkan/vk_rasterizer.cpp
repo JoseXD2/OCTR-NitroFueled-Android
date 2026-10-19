@@ -4,6 +4,7 @@
 #ifndef _WIN32
 #include "bbport_null_resources.h"
 #include <chrono>
+#include <unistd.h>
 #include <dlfcn.h>
 #endif
 #include <map>
@@ -4515,8 +4516,19 @@ void Rasterizer::NoteFrameStart() {
         const double secs = std::chrono::duration<double>(now - last).count();
         if (secs >= 5.0) {
             const u64 draws = BbStats::draws.load(std::memory_order_relaxed);
-            std::printf("FPS: %.1f GPU frames/s, %.0f draws/frame\n", (frame - last_frame) / secs,
-                        frame > last_frame ? double(draws - last_draws) / double(frame - last_frame) : 0.0);
+            long rss_pages = 0;
+            if (FILE* statm = std::fopen("/proc/self/statm", "r")) {
+                long size_pages = 0;
+                if (std::fscanf(statm, "%ld %ld", &size_pages, &rss_pages) != 2) rss_pages = 0;
+                std::fclose(statm);
+            }
+            std::printf("FPS: %.1f GPU frames/s, %.0f draws/frame; memory: %ld MiB resident, "
+                        "%llu MiB images, %llu MiB buffer arenas\n",
+                        (frame - last_frame) / secs,
+                        frame > last_frame ? double(draws - last_draws) / double(frame - last_frame) : 0.0,
+                        rss_pages * (sysconf(_SC_PAGESIZE) >> 10) >> 10,
+                        (unsigned long long)(BbStats::vk_image_bytes.load(std::memory_order_relaxed) >> 20),
+                        (unsigned long long)(buffer_cache.DenseArenaBytes() >> 20));
             last = now;
             last_frame = frame;
             last_draws = draws;

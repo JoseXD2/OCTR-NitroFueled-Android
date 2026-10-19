@@ -215,10 +215,23 @@ private:
     }
 
     const Buffer* GetArena(u64 first_block, u64 last_block);
-    void MigrateDenseArena(const Buffer* new_arena, const Buffer* first_arena,
-                           const Buffer* last_arena, u64 first_size, u64 base_block, u64 end_block);
-    /// SacredFire Android: no sparse residency buffers: arenas are ordinary buffers.
+    /// SacredFire Android: no sparse residency buffers: arenas are ordinary buffers ("dense"),
+    /// over the pages actually used (BB_DENSE_ARENA_MIB, 256 MiB pages). A request reaching
+    /// further gets one arena over all of them, the old ones copied into it and freed once the
+    /// GPU is done with them.
+    const Buffer* GetDenseArena(u64 first_page, u64 last_page);
+    void MigrateDenseArena(const Buffer* new_arena, std::span<const Buffer* const> old_arenas,
+                           u64 base_block, u64 end_block);
+    void FreeRetiredArenas();
     bool dense_arenas{false};
+    std::vector<std::pair<u64, Buffer*>> retired_arenas; ///< tick, arena
+    u64 dense_arena_bytes{0};
+public:
+    /// SacredFire Android: memory held by dense arenas (statistics).
+    u64 DenseArenaBytes() const {
+        return dense_arena_bytes;
+    }
+private:
     MemoryType ArenaMemoryType() const {
         return dense_arenas ? MemoryType::DeviceLocal : MemoryType::Sparse;
     }

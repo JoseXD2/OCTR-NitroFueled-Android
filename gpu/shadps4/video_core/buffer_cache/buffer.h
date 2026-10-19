@@ -149,6 +149,12 @@ struct Buffer {
 
     /// SacredFire Android (dense arenas): the memory a non-sparse buffer is bound to, and where.
     std::pair<vk::DeviceMemory, u64> BackingMemory() const;
+    /// SacredFire Android: frees the buffer and its memory (a replaced dense arena); the object
+    /// stays, covering nothing.
+    void Release() {
+        buffer = UniqueBuffer{buffer.device, buffer.allocator};
+        size_bytes = 0;
+    }
 
     /// Makes host writes in provided range visible to the device.
     void Flush(u64 offset, u64 size);

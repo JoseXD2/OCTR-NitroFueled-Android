@@ -515,7 +515,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     // buffer with its own memory ("dense"), 1 GiB pages: the blocks are always resident in it.
     dense_arenas = !instance.IsSparseBufferSupported();
     if (dense_arenas) {
-        arena_page_bits = MIN_ARENA_PAGE_BITS;
+        const char* mib = std::getenv("BB_DENSE_ARENA_MIB");
+        const u64 page_mib = std::bit_floor(std::clamp<u64>(mib ? std::strtoull(mib, nullptr, 0) : 256, 16, 4096));
+        arena_page_bits = std::countr_zero(page_mib) + 20;
         arena_page_size = u64{1} << arena_page_bits;
         num_arena_pages = u64{1} << (ADDRESS_SPACE_BITS - arena_page_bits);
         std::printf("GPU: no sparse buffers on this device: dense buffer arenas of %llu MiB\n",
@@ -1167,16 +1169,12 @@ void BufferCache::SynchronizeDmaBuffers() {
 // SacredFire Android (dense arenas): a request spanning two arena pages gets one arena over both;
 // with no sparse aliasing, the old arenas' contents are copied into it and the resident blocks'
 // device addresses (BDA page table) point at it from now on.
-void BufferCache::MigrateDenseArena(const Buffer* new_arena, const Buffer* first_arena,
-                                    const Buffer* last_arena, u64 first_size, u64 base_block,
+void BufferCache::MigrateDenseArena(const Buffer* new_arena,
+                                    std::span<const Buffer* const> old_arenas, u64 base_block,
                                     u64 end_block) {
-    if (first_arena) {
-        const vk::BufferCopy copy{0, 0, first_arena->size_bytes};
-        runtime.CopyBuffer(first_arena, new_arena, std::span{&copy, 1});
-    }
-    if (last_arena) {
-        const vk::BufferCopy copy{0, first_size, last_arena->size_bytes};
-        runtime.CopyBuffer(last_arena, new_arena, std::span{&copy, 1});
+    for (const Buffer* old : old_arenas) {
+        const vk::BufferCopy copy{0, old->cpu_addr - new_arena->cpu_addr, old->size_bytes};
+        runtime.CopyBuffer(old, new_arena, std::span{&copy, 1});
     }
     const auto [memory, memory_base] = new_arena->BackingMemory();
     boost::container::small_vector<vk::BufferCopy, 8> copies;
@@ -1214,9 +1212,60 @@ void BufferCache::MigrateDenseArena(const Buffer* new_arena, const Buffer* first
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
 }
 
+const Buffer* BufferCache::GetDenseArena(u64 first_page, u64 last_page) {
+    const Buffer* first = address_space[first_page];
+    if (first && first == address_space[last_page]) {
+        return first; // an arena covers consecutive pages
+    }
+    // The pages to cover: the request's and those of the arenas it touches.
+    u64 lo = first_page, hi = last_page;
+    boost::container::small_vector<const Buffer*, 8> olds;
+    for (u64 page = first_page; page <= last_page; ++page) {
+        const Buffer* arena = address_space[page];
+        if (arena && (olds.empty() || olds.back() != arena)) {
+            olds.push_back(arena);
+            lo = std::min(lo, arena->cpu_addr >> arena_page_bits);
+            hi = std::max(hi, (arena->cpu_addr + arena->size_bytes - 1) >> arena_page_bits);
+        }
+    }
+    const u64 size = (hi - lo + 1) << arena_page_bits;
+    auto* arena = &arenas.emplace_back(instance, lo << arena_page_bits, size, ArenaMemoryType());
+    dense_arena_bytes += size;
+    if (!olds.empty()) {
+        MigrateDenseArena(arena, olds, (lo << arena_page_bits) >> block_shift,
+                          ((hi + 1) << arena_page_bits) >> block_shift);
+        for (const Buffer* old : olds) {
+            retired_arenas.emplace_back(scheduler.CurrentTick(), const_cast<Buffer*>(old));
+        }
+    }
+    for (u64 page = lo; page <= hi; ++page) {
+        address_space[page] = arena;
+    }
+    std::printf("GPU: dense arena %#llx-%#llx (%llu MiB)%s, %llu MiB in arenas\n",
+                (unsigned long long)(lo << arena_page_bits),
+                (unsigned long long)((hi + 1) << arena_page_bits), (unsigned long long)(size >> 20),
+                olds.empty() ? "" : " replacing smaller ones",
+                (unsigned long long)(dense_arena_bytes >> 20));
+    return arena;
+}
+
+void BufferCache::FreeRetiredArenas() {
+    std::erase_if(retired_arenas, [&](const std::pair<u64, Buffer*>& retired) {
+        if (!scheduler.IsFree(retired.first)) {
+            return false;
+        }
+        dense_arena_bytes -= retired.second->size_bytes;
+        retired.second->Release();
+        return true;
+    });
+}
+
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 first_page = first_block >> blocks_per_arena_page_shift;
     const u64 last_page = last_block >> blocks_per_arena_page_shift;
+    if (dense_arenas) {
+        return GetDenseArena(first_page, last_page);
+    }
     ASSERT_MSG(last_page - first_page <= 1,
                "Buffer request cannot span more than two VA arena pages");
 
@@ -1245,11 +1294,8 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 total_size = first_size + last_size;
     const u64 end_block = (first_addr + total_size) >> block_shift;
     auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, ArenaMemoryType());
-    if (dense_arenas) {
-        MigrateDenseArena(new_arena, first_arena, last_arena, first_size, base_block, end_block);
-    }
-    auto* bind = dense_arenas ? nullptr : BindsForArena(new_arena);
-    if (bind) resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
+    auto* bind = BindsForArena(new_arena);
+    resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
         const u64 start = std::max(base_block, backing.start);
         const u64 end = std::min(end_block, backing.end);
         bind->binds.push_back(vk::SparseMemoryBind{
@@ -2768,6 +2814,7 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     const u64 submitted = scheduler.CurrentTick() - 1;
     if (dense_arenas) {
         pending_binds.clear(); // SacredFire Android: dense arenas are never (un)bound
+        FreeRetiredArenas();
     }
     if (pending_binds.empty()) {
         QueueCopyBacks(submitted);
