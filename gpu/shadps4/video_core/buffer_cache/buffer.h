@@ -147,6 +147,9 @@ struct Buffer {
         return buffer.bda_addr;
     }
 
+    /// SacredFire Android (dense arenas): the memory a non-sparse buffer is bound to, and where.
+    std::pair<vk::DeviceMemory, u64> BackingMemory() const;
+
     /// Makes host writes in provided range visible to the device.
     void Flush(u64 offset, u64 size);
 

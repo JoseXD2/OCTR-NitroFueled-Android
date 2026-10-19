@@ -198,7 +198,10 @@ public:
         return dynamic_state_3 && dynamic_state_3_features.extendedDynamicState3ColorWriteMask;
     }
 
-    /// Returns true when VK_EXT_vertex_input_dynamic_state is supported.
+    bool IsSparseBufferSupported() const {
+        return features.sparseBinding && features.sparseResidencyBuffer;
+    }
+
     /// SacredFire Android: VK_EXT_robustness2's nullDescriptor (else bbport_null_resources).
     bool IsNullDescriptorSupported() const {
         return null_descriptor;

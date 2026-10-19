@@ -31,7 +31,9 @@
 
 #include <mutex>
 #include <pthread.h>
+#if defined(__x86_64__)
 #include <x86intrin.h>
+#endif
 #include <vk_mem_alloc.h>
 
 extern "C" int runtime_memory_vma_info(uintptr_t address, int* prot, int* type, uintptr_t* end);
@@ -509,9 +511,20 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         LOG_INFO(Render_Vulkan, "Buffer arenas of {} MiB (driver buffer limit {} MiB)",
                  arena_page_size >> 20, instance.GetMaxBufferSize() >> 20);
     }
+    // SacredFire Android: without sparse residency buffers (Mali) every arena is an ordinary
+    // buffer with its own memory ("dense"), 1 GiB pages: the blocks are always resident in it.
+    dense_arenas = !instance.IsSparseBufferSupported();
+    if (dense_arenas) {
+        arena_page_bits = MIN_ARENA_PAGE_BITS;
+        arena_page_size = u64{1} << arena_page_bits;
+        num_arena_pages = u64{1} << (ADDRESS_SPACE_BITS - arena_page_bits);
+        std::printf("GPU: no sparse buffers on this device: dense buffer arenas of %llu MiB\n",
+                    (unsigned long long)(arena_page_size >> 20));
+    }
     const vk::BufferCreateInfo probe_ci = {
-        .flags =
-            vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
+        .flags = dense_arenas ? vk::BufferCreateFlags{}
+                              : vk::BufferCreateFlagBits::eSparseBinding |
+                                    vk::BufferCreateFlagBits::eSparseResidency,
         .size = arena_page_size,
         .usage = ARENA_USAGE,
         .sharingMode = shared ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive,
@@ -1151,6 +1164,56 @@ void BufferCache::SynchronizeDmaBuffers() {
     }
 }
 
+// SacredFire Android (dense arenas): a request spanning two arena pages gets one arena over both;
+// with no sparse aliasing, the old arenas' contents are copied into it and the resident blocks'
+// device addresses (BDA page table) point at it from now on.
+void BufferCache::MigrateDenseArena(const Buffer* new_arena, const Buffer* first_arena,
+                                    const Buffer* last_arena, u64 first_size, u64 base_block,
+                                    u64 end_block) {
+    if (first_arena) {
+        const vk::BufferCopy copy{0, 0, first_arena->size_bytes};
+        runtime.CopyBuffer(first_arena, new_arena, std::span{&copy, 1});
+    }
+    if (last_arena) {
+        const vk::BufferCopy copy{0, first_size, last_arena->size_bytes};
+        runtime.CopyBuffer(last_arena, new_arena, std::span{&copy, 1});
+    }
+    const auto [memory, memory_base] = new_arena->BackingMemory();
+    boost::container::small_vector<vk::BufferCopy, 8> copies;
+    std::vector<std::pair<u64, u64>> ranges;
+    u64 total = 0;
+    resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
+        const u64 start = std::max(base_block, backing.start);
+        const u64 end = std::min(end_block, backing.end);
+        ranges.emplace_back(start, end);
+        total += end - start;
+    });
+    if (total == 0) {
+        return;
+    }
+    const auto staging =
+        staging_pool.Request(total * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
+    auto* addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
+    u64 offset = staging.offset;
+    for (const auto& [start, end] : ranges) {
+        for (u64 block = start; block < end; ++block) {
+            *(addrs++) = new_arena->BufferDeviceAddress() + (block << block_shift) - new_arena->cpu_addr;
+        }
+        Backing backing;
+        backing.start = start;
+        backing.end = end;
+        backing.memory = memory;
+        backing.offset = (memory_base + (start << block_shift) - new_arena->cpu_addr) >> block_shift;
+        resident_ranges.Subtract(start, end);
+        resident_ranges.Add(backing);
+        const u64 size = (end - start) * sizeof(vk::DeviceAddress);
+        copies.emplace_back(offset, start * sizeof(vk::DeviceAddress), size);
+        offset += size;
+    }
+    staging.Flush();
+    runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
+}
+
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 first_page = first_block >> blocks_per_arena_page_shift;
     const u64 last_page = last_block >> blocks_per_arena_page_shift;
@@ -1165,7 +1228,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
             const u64 num_pages = last_page - first_page + 1;
             const auto* new_arena =
                 &arenas.emplace_back(instance, base_block << block_shift,
-                                     num_pages << arena_page_bits, MemoryType::Sparse);
+                                     num_pages << arena_page_bits, ArenaMemoryType());
             address_space[first_page] = new_arena;
             address_space[last_page] = new_arena;
         }
@@ -1181,9 +1244,12 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 base_block = first_addr >> block_shift;
     const u64 total_size = first_size + last_size;
     const u64 end_block = (first_addr + total_size) >> block_shift;
-    auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
-    auto* bind = BindsForArena(new_arena);
-    resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
+    auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, ArenaMemoryType());
+    if (dense_arenas) {
+        MigrateDenseArena(new_arena, first_arena, last_arena, first_size, base_block, end_block);
+    }
+    auto* bind = dense_arenas ? nullptr : BindsForArena(new_arena);
+    if (bind) resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
         const u64 start = std::max(base_block, backing.start);
         const u64 end = std::min(end_block, backing.end);
         bind->binds.push_back(vk::SparseMemoryBind{
@@ -1243,6 +1309,15 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     for (const auto& range : bind_ranges) {
         vram_blocks += range.end - range.start;
     }
+    if (dense_arenas) {
+        // SacredFire Android: the arena's own memory holds every block (no binds).
+        const auto [memory, memory_base] = arena->BackingMemory();
+        for (const auto& range : bind_ranges) {
+            binds.push_back({range.start, range.end, memory,
+                             memory_base + (range.start << block_shift) - arena->cpu_addr});
+        }
+        vram_blocks = 0;
+    }
 
     if (vram_blocks != 0) {
         // bbport: the slots of blocks that left VRAM first, block by block. A request of several
@@ -1282,7 +1357,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
         staging_pool.Request(total_blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
-    ArenaBinds* arena_binds = BindsForArena(arena);
+    ArenaBinds* arena_binds = dense_arenas ? nullptr : BindsForArena(arena);
     auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
     u64 offset = staging.offset;
     for (const auto& bind : binds) {
@@ -1293,12 +1368,13 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.offset = bind.offset >> block_shift;
         resident_ranges.Add(backing);
 
-        const auto& sparse = arena_binds->binds.emplace_back(vk::SparseMemoryBind{
+        const vk::SparseMemoryBind sparse_bind{
             .resourceOffset = (bind.start << block_shift) - arena->cpu_addr,
             .size = (bind.end - bind.start) << block_shift,
             .memory = bind.memory,
             .memoryOffset = bind.offset,
-        });
+        };
+        const auto& sparse = arena_binds ? arena_binds->binds.emplace_back(sparse_bind) : sparse_bind;
         for (u64 block = 0; block < sparse.size; block += block_size) {
             *(bda_addrs++) = arena->BufferDeviceAddress() + sparse.resourceOffset + block;
         }
@@ -2690,6 +2766,9 @@ void BufferCache::Preupload(u64 budget) {
 void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     // The submission going out has the tick before the current one.
     const u64 submitted = scheduler.CurrentTick() - 1;
+    if (dense_arenas) {
+        pending_binds.clear(); // SacredFire Android: dense arenas are never (un)bound
+    }
     if (pending_binds.empty()) {
         QueueCopyBacks(submitted);
         QueuePromotions(submitted);

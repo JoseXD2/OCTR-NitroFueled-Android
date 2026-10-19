@@ -177,7 +177,9 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
     // bbport: arenas are also read by the readback queue (BufferCache::DownloadMemory).
     const std::array<u32, 2> families = {instance.GetGraphicsQueueFamilyIndex(),
                                          instance.GetReadbackQueueFamilyIndex()};
-    if (mem_type == MemoryType::Sparse && instance.GetReadbackQueue()) {
+    // SacredFire Android: dense arenas (1 GiB and up, no sparse support) are shared the same way.
+    if ((mem_type == MemoryType::Sparse || (cpu_addr != 0 && size_bytes >= (u64{1} << 30))) &&
+        instance.GetReadbackQueue()) {
         buffer_ci.sharingMode = vk::SharingMode::eConcurrent;
         buffer_ci.queueFamilyIndexCount = static_cast<u32>(families.size());
         buffer_ci.pQueueFamilyIndices = families.data();
@@ -201,6 +203,15 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
         }
         is_coherent = property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     }
+}
+
+std::pair<vk::DeviceMemory, u64> Buffer::BackingMemory() const {
+    if (!buffer.allocation) {
+        return {};
+    }
+    VmaAllocationInfo info{};
+    vmaGetAllocationInfo(buffer.allocator, buffer.allocation, &info);
+    return {vk::DeviceMemory{info.deviceMemory}, info.offset};
 }
 
 void Buffer::Flush(u64 offset, u64 size) {
