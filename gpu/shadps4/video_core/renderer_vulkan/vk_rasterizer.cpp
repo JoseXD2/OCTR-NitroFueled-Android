@@ -3,6 +3,7 @@
 
 #ifndef _WIN32
 #include "bbport_null_resources.h"
+#include <chrono>
 #include <dlfcn.h>
 #endif
 #include <map>
@@ -4505,6 +4506,23 @@ void Rasterizer::NoteFrameStart() {
         profiler->BeginFrame();
     }
     const u64 frame = BbStats::gpu_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+#ifdef BB_ANDROID
+    // bbport: frames per second in the log every 5 s (test builds: the phone has no overlay yet).
+    {
+        static auto last = std::chrono::steady_clock::now();
+        static u64 last_frame = 0, last_draws = 0;
+        const auto now = std::chrono::steady_clock::now();
+        const double secs = std::chrono::duration<double>(now - last).count();
+        if (secs >= 5.0) {
+            const u64 draws = BbStats::draws.load(std::memory_order_relaxed);
+            std::printf("FPS: %.1f GPU frames/s, %.0f draws/frame\n", (frame - last_frame) / secs,
+                        frame > last_frame ? double(draws - last_draws) / double(frame - last_frame) : 0.0);
+            last = now;
+            last_frame = frame;
+            last_draws = draws;
+        }
+    }
+#endif
     // BB_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame — the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {

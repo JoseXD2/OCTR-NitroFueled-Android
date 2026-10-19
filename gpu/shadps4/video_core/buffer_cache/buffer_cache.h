@@ -217,6 +217,7 @@ private:
     const Buffer* GetArena(u64 first_block, u64 last_block);
     void MigrateDenseArena(const Buffer* new_arena, const Buffer* first_arena,
                            const Buffer* last_arena, u64 first_size, u64 base_block, u64 end_block);
+    /// SacredFire Android: no sparse residency buffers: arenas are ordinary buffers.
     bool dense_arenas{false};
     MemoryType ArenaMemoryType() const {
         return dense_arenas ? MemoryType::DeviceLocal : MemoryType::Sparse;
