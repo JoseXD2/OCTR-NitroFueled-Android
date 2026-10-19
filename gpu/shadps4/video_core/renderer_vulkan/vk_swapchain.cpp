@@ -158,7 +158,15 @@ bool Swapchain::AcquireNextImage() {
     switch (result) {
     case vk::Result::eSuccess:
         break;
+#ifdef BB_ANDROID
+    // SacredFire Android: suboptimal means the picture is not pre-rotated to the display's
+    // orientation (landscape: 90 degrees); the compositor rotates it. Recreating gives the same
+    // result, and did so every frame: frames were skipped (the picture flickered).
     case vk::Result::eSuboptimalKHR:
+        break;
+#else
+    case vk::Result::eSuboptimalKHR:
+#endif
     case vk::Result::eErrorSurfaceLostKHR:
     case vk::Result::eErrorOutOfDateKHR:
     case vk::Result::eErrorUnknown:
@@ -183,10 +191,22 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
-    auto result = instance.GetPresentQueue().presentKHR(present_info);
-    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR ||
+    vk::Result result;
+    {
+        std::scoped_lock present_lock{present_queue_mutex};
+        result = instance.GetPresentQueue().presentKHR(present_info);
+    }
+#ifdef BB_ANDROID
+    const bool suboptimal_recreates = false; // see AcquireNextImage
+#else
+    const bool suboptimal_recreates = true;
+#endif
+    if (result == vk::Result::eErrorOutOfDateKHR ||
+        (result == vk::Result::eSuboptimalKHR && suboptimal_recreates) ||
         result == vk::Result::eErrorSurfaceLostKHR) {
         needs_recreation = true;
+    } else if (result == vk::Result::eSuboptimalKHR) {
+        // presented (rotated by the compositor)
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
@@ -303,6 +323,7 @@ void Swapchain::SetSurfaceProperties() {
 
 void Swapchain::Destroy() {
     vk::Device device = instance.GetDevice();
+    std::scoped_lock present_lock{present_queue_mutex}; // waitIdle: every queue to itself
     const auto wait_result = device.waitIdle();
     if (wait_result != vk::Result::eSuccess) {
         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",

@@ -18,6 +18,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <ucontext.h>
 #include <errno.h>
 #include <pthread.h>
@@ -175,8 +176,8 @@ static int read_threads(struct thread_sample *out, int max) {
 /* The busiest threads are sampled (SIGPROF every 2 ms) to show where they run: a guest
  * address (+offset in the game image, from Box64's dynarec blocks) or a host function. */
 unsigned char *bb_guest_image(void);
-enum { SAMPLE_MAX = 16384, SAMPLED_THREADS = 4 };
-static struct { int tid; uintptr_t pc, lr; } samples[SAMPLE_MAX];
+enum { SAMPLE_MAX = 16384, SAMPLED_THREADS = 6, SAMPLE_FRAMES = 6 };
+static struct { int tid; uintptr_t pc, lr; uintptr_t frames[SAMPLE_FRAMES]; } samples[SAMPLE_MAX];
 static atomic_int sample_count;
 static void sample_handler(int sig, siginfo_t *info, void *context) {
     (void)sig; (void)info;
@@ -186,6 +187,19 @@ static void sample_handler(int sig, siginfo_t *info, void *context) {
     samples[i].tid = (int)syscall(SYS_gettid);
     samples[i].pc = (uintptr_t)uc->uc_mcontext.pc;
     samples[i].lr = (uintptr_t)uc->uc_mcontext.regs[30];
+    /* Callers through the frame pointers (x29: [previous x29, return address]), read with
+     * process_vm_readv so a bad chain cannot fault in the handler. */
+    uintptr_t fp = (uintptr_t)uc->uc_mcontext.regs[29];
+    const uintptr_t sp = (uintptr_t)uc->uc_mcontext.sp;
+    for (int k = 0; k < SAMPLE_FRAMES; ++k) {
+        samples[i].frames[k] = 0;
+        if ((fp & 7) || fp < sp || fp - sp > (8u << 20)) continue;
+        uintptr_t pair[2];
+        struct iovec local = {pair, sizeof pair}, remote = {(void *)fp, sizeof pair};
+        if (syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0) != (long)sizeof pair) { fp = 1; continue; }
+        samples[i].frames[k] = pair[1];
+        fp = pair[0] > fp ? pair[0] : 1;
+    }
 }
 static int describe_pc(uintptr_t pc, char *out, size_t size) {
     const uintptr_t guest = bbx_guest_pc(pc);
@@ -212,16 +226,22 @@ static void sample_report(const int *tids, char names[][32], int n) {
     if (total > SAMPLE_MAX) total = SAMPLE_MAX;
     for (int t = 0; t < n; ++t) {
         /* distinct (pc description) counts for this thread */
-        static char keys[256][96];
+        static char keys[256][320];
         static int counts[256];
         int nk = 0, all = 0;
         for (int i = 0; i < total; ++i) {
             if (samples[i].tid != tids[t]) continue;
-            char key[96];
-            int len = describe_pc(samples[i].pc, key, sizeof key);
-            if (!bbx_guest_pc(samples[i].pc) && len < (int)sizeof key - 8) {
+            char key[320];
+            int len = describe_pc(samples[i].pc, key, 96);
+            if (!bbx_guest_pc(samples[i].pc) && len < 96) {
                 key[len++] = '<';
-                describe_pc(samples[i].lr, key + len, sizeof key - len);
+                len += describe_pc(samples[i].lr, key + len, 96);
+                /* the port's own callers: the waits are named by them */
+                for (int f = 0; f < SAMPLE_FRAMES && samples[i].frames[f] && len < (int)sizeof key - 70; ++f) {
+                    Dl_info dl = {0};
+                    if (!dladdr((void *)samples[i].frames[f], &dl) || !dl.dli_fname || !strstr(dl.dli_fname, "sacredfire") || !dl.dli_sname) continue;
+                    len += snprintf(key + len, sizeof key - len, "<%.60s", dl.dli_sname);
+                }
             }
             ++all;
             int k = 0;
@@ -237,9 +257,9 @@ static void sample_report(const int *tids, char names[][32], int n) {
         int order[256];
         for (int k = 0; k < nk; ++k) order[k] = (counts[k] << 16) | k;
         qsort(order, nk, sizeof *order, cmp_desc);
-        char line[1400];
+        char line[3000];
         int at = snprintf(line, sizeof line, "Samples %s (%d):", names[t], all);
-        for (int k = 0; k < nk && k < 8 && at < (int)sizeof line - 120; ++k) {
+        for (int k = 0; k < nk && k < 8 && at < (int)sizeof line - 340; ++k) {
             const int idx = order[k] & 0xffff;
             at += snprintf(line + at, sizeof line - at, " %s %d%%", keys[idx], counts[idx] * 100 / all);
         }
@@ -337,6 +357,16 @@ static void *thread_stats_main(void *arg) {
             if (dt[top[k]] * 100 / (5 * hz) < 25 || cur[top[k]].tid == (int)syscall(SYS_gettid)) continue;
             sampled[n_sampled] = cur[top[k]].tid;
             snprintf(sampled_names[n_sampled], sizeof sampled_names[0], "%s", cur[top[k]].name);
+            ++n_sampled;
+        }
+        /* The GPU threads always (their waits decide the frame rate). */
+        for (int i = 0; sampling && i < nc && n_sampled < SAMPLED_THREADS; ++i) {
+            if (strncmp(cur[i].name, "shadPS4:GpuComm", 15) && strncmp(cur[i].name, "bb:VkRecorder", 13) && strncmp(cur[i].name, "bb:DrawRec", 10) && strncmp(cur[i].name, "bb:Present", 10)) continue;
+            int dup = 0;
+            for (int k = 0; k < n_sampled; ++k) dup |= sampled[k] == cur[i].tid;
+            if (dup) continue;
+            sampled[n_sampled] = cur[i].tid;
+            snprintf(sampled_names[n_sampled], sizeof sampled_names[0], "%s", cur[i].name);
             ++n_sampled;
         }
         memcpy(prev, cur, sizeof(cur[0]) * nc);

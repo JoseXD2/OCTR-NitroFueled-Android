@@ -1005,6 +1005,14 @@ static int handle_input(const AInputEvent *event) {
         const bool from_pad = (source & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD ||
                               (source & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK;
         const SDL_GamepadButton button = pad_button_for_key(code);
+        {
+            static int keys_logged;
+            if (down && !repeat && keys_logged < 40) { /* test builds: the controller's key codes */
+                ++keys_logged;
+                printf("SDL (Android): pad key code %d scan code %d -> button %d\n", code,
+                       AKeyEvent_getScanCode(event), (int)button);
+            }
+        }
         if (code == AKEYCODE_BACK) {
             /* Back toggles the settings menu instead of closing the app. */
             if (down && !repeat) key_tap(SDL_SCANCODE_INSERT, SDLK_INSERT);

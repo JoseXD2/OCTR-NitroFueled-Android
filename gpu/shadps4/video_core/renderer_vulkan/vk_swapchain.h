@@ -123,6 +123,8 @@ private:
     const Frontend::WindowSDL& window;
     vk::SwapchainKHR swapchain{};
     vk::SurfaceKHR surface{};
+    /// SacredFire Android: the present queue (its own queue, outside the submission lock).
+    std::mutex present_queue_mutex;
     void* android_window{}; ///< SacredFire Android: the ANativeWindow `surface` was made for
     vk::SurfaceFormatKHR surface_format;
     vk::Format view_format;

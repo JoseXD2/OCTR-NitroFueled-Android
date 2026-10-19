@@ -723,8 +723,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 
     // Present to swapchain.
     {
-        std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        // SacredFire Android: a present queue of its own needs no submission lock to present
+        // (presenting can wait for the display); recreating still takes it (waitIdle).
+        std::unique_lock submit_lock{Scheduler::submit_mutex, std::defer_lock};
+        if (!instance.HasSeparatePresentQueue()) {
+            submit_lock.lock();
+        }
         if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
+            if (!submit_lock.owns_lock()) {
+                submit_lock.lock();
+            }
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }

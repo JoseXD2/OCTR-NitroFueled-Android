@@ -449,10 +449,21 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    static constexpr std::array queue_priorities = {1.0f};
+    static constexpr std::array queue_priorities = {1.0f, 1.0f};
+    // SacredFire Android: presentation on a second queue of the graphics family when there is
+    // one (Mali: two). Presenting waits for the display there (the compositor's buffers) without
+    // holding the graphics queue's lock, which blocked every submission meanwhile.
+    u32 graphics_queues = 1;
+#ifdef BB_ANDROID
+    if (const char* env = std::getenv("BB_PRESENT_QUEUE");
+        family_properties[queue_family_index].queueCount >= 2 && !(env && env[0] == '0')) {
+        graphics_queues = 2;
+    }
+#endif
+    separate_present_queue = graphics_queues == 2;
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
+        .queueCount = graphics_queues,
         .pQueuePriorities = queue_priorities.data(),
     };
     // bbport: a queue of a compute and transfer family without graphics, for reading back GPU
@@ -734,7 +745,10 @@ bool Instance::CreateDevice() {
     }
 
     graphics_queue = device->getQueue(queue_family_index, 0);
-    present_queue = device->getQueue(queue_family_index, 0);
+    present_queue = device->getQueue(queue_family_index, separate_present_queue ? 1 : 0);
+    if (separate_present_queue) {
+        std::printf("GPU: presentation on its own queue (graphics family queue 1)\n");
+    }
     if (readback_family_index != NoFamily) {
         readback_queue = device->getQueue(readback_family_index, 0);
         LOG_INFO(Render_Vulkan, "Readback queue: family {}", readback_family_index);

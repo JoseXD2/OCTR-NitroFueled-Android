@@ -90,6 +90,9 @@ public:
         return graphics_queue;
     }
 
+    bool HasSeparatePresentQueue() const {
+        return separate_present_queue;
+    }
     vk::Queue GetPresentQueue() const {
         return present_queue;
     }
@@ -198,6 +201,7 @@ public:
         return dynamic_state_3 && dynamic_state_3_features.extendedDynamicState3ColorWriteMask;
     }
 
+    /// SacredFire Android: sparse residency buffers (else the buffer cache's dense arenas).
     bool IsSparseBufferSupported() const {
         return features.sparseBinding && features.sparseResidencyBuffer;
     }
@@ -576,6 +580,7 @@ private:
     std::string vendor_name;
     VmaAllocator allocator{};
     vk::Queue present_queue;
+    bool separate_present_queue{false};
     vk::Queue graphics_queue;
     vk::Queue readback_queue;
     bool guest_memory_export{};
