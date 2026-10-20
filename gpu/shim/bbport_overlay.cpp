@@ -872,7 +872,10 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     info.Queue = instance.GetGraphicsQueue();
     info.DescriptorPoolSize = 16;
     info.MinImageCount = std::max(image_count, 2u);
-    info.ImageCount = std::max(image_count, 2u);
+    // bbport: ImGui's vertex buffers rotate over ImageCount frames, unsynchronized. Presents can
+    // run further ahead than the swapchain's images (SacredFire Android: the touch controls
+    // flickered, their buffers rewritten while the GPU drew them); 8 sets stay clear of that.
+    info.ImageCount = std::max(image_count, 8u);
     info.UseDynamicRendering = true;
     info.PipelineInfoMain.PipelineRenderingCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,

@@ -414,6 +414,12 @@ int bb_android_main(ANativeActivity *activity) {
     set_default("BB_GPU_WRITE_TWINS_MAX", "65536");
     set_default("BB_VBLANK_HZ", "60");
     set_default("BB_GPU_USER_DIR", user);
+    /* Box64 settings tested on the phone (env.txt can still override them): weaker memory
+     * ordering, bigger translated blocks and no exact flags for unused results. */
+    set_default("BB_STRONGMEM", "0");
+    set_default("BOX64_DYNAREC_BIGBLOCK", "3");
+    set_default("BOX64_DYNAREC_SAFEFLAGS", "0");
+    set_default("BOX64_DYNAREC_FORWARD", "1024");
 
     char boot[600], names[600], content[600], patches[600];
     snprintf(boot, sizeof boot, "%s/boot-linked.bin", out);
