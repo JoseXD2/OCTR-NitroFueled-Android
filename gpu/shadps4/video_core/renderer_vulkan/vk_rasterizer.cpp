@@ -3120,6 +3120,31 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             auto& image_view = texture_cache.FindTexture(
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
             const auto binding = image.binding;
+            // bbport BB_DISPLAY_DEBUG=1: what the display passes sample (first 60).
+            static const bool display_debug = [] {
+                const char* env = std::getenv("BB_DISPLAY_DEBUG");
+                return env && env[0] == '1';
+            }();
+            if (display_debug && last_draw_display) {
+                // Each image once (address, size, format), up to 400.
+                static std::mutex seen_mutex;
+                static std::unordered_set<u64> seen;
+                const u64 key = image.info.guest_address ^ (u64(image.info.size.width) << 44) ^
+                                (u64(image.info.size.height) << 52) ^ u64(image.info.pixel_format) << 36;
+                bool fresh = false;
+                {
+                    std::scoped_lock lk{seen_mutex};
+                    fresh = seen.size() < 400 && seen.insert(key).second;
+                }
+                if (fresh) {
+                    std::printf("Display pass samples %#llx %ux%u %s pitch %u tiling %d flags %#x%s%s\n",
+                                (unsigned long long)image.info.guest_address, image.info.size.width,
+                                image.info.size.height, vk::to_string(image.info.pixel_format).c_str(),
+                                image.info.pitch, (int)image.info.tile_mode, (unsigned)image.flags,
+                                FsrRedirects(image_id) ? " fsr" : "",
+                                binding_proxy_ok[binding_index] && scene_targets->Reduced() ? " proxy-ok" : "");
+                }
+            }
 
             // bbport: a proxied scene image sampled with normalized coordinates reads the proxy:
             // no resample to the native size (the native image is not touched).
@@ -4521,6 +4546,17 @@ vk::ImageView Rasterizer::DisplayFsr(VideoCore::ImageId id, vk::ImageView game_v
     if (BbSettings::Get().temporal != BbSettings::TemporalFsr1) {
         return {};
     }
+#ifdef BB_ANDROID
+    // SacredFire Android: the FSR 1 pass gave a black picture on Mali (the game's display pass
+    // then showed only the UI); the game's own stretch is used. BB_DISPLAY_FSR=1: FSR 1.
+    static const bool display_fsr_on = [] {
+        const char* env = std::getenv("BB_DISPLAY_FSR");
+        return env && env[0] == '1';
+    }();
+    if (!display_fsr_on) {
+        return {};
+    }
+#endif
     // Only a smaller scene of the display's shape: no FSR at native size or for other images.
     if (in.width >= out.width || in.height >= out.height || in.width * 4 < out.width ||
         std::abs(double(in.width) / in.height - double(out.width) / out.height) > 0.02) {
