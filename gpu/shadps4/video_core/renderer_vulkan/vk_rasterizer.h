@@ -392,6 +392,9 @@ private:
 
     /// Display pass: counts the frame (BbStats::gpu_frames) and, with BB_BUFFER_STATS, the lag.
     void NoteFrameStart();
+    /// bbport BB_CAPTURE_IMAGES: the last pass's color targets and the pass number.
+    std::vector<VideoCore::ImageId> capture_prev;
+    int capture_index = 0;
     /// BB_GPU_PROFILE: a timestamp where a render pass starts (vk_gpu_profiler.h).
     void MarkPass(const GraphicsPipeline* pipeline, const RenderState& state);
     void BindVertexBuffers(const GraphicsPipeline* pipeline,

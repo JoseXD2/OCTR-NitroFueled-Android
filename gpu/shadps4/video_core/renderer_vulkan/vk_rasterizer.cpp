@@ -34,6 +34,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include <cmath>
 #include "bbport_threads.h"
@@ -3801,6 +3802,45 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         const auto* depth =
             db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
+        // bbport BB_CAPTURE_IMAGES=1: the color targets of each recorded pass, dumped when the
+        // next one starts (BB_DUMP_DIR): where in the frame the picture goes wrong.
+        static const bool capture_images = [] {
+            const char* env = std::getenv("BB_CAPTURE_IMAGES");
+            return env && env[0] == '1';
+        }();
+        if (capture_images && FrameCapture::IsRecording()) {
+            const auto cmdbuf = scheduler.CommandBuffer();
+            for (const auto id : capture_prev) {
+                auto& image = texture_cache.GetImage(id);
+                const auto fmt = image.info.pixel_format;
+                const bool four_bytes =
+                    fmt == vk::Format::eR8G8B8A8Unorm || fmt == vk::Format::eR8G8B8A8Srgb ||
+                    fmt == vk::Format::eB8G8R8A8Unorm || fmt == vk::Format::eB8G8R8A8Srgb ||
+                    fmt == vk::Format::eA2B10G10R10UnormPack32 || fmt == vk::Format::eB10G11R11UfloatPack32 ||
+                    fmt == vk::Format::eR32Sfloat || fmt == vk::Format::eR32Uint;
+                if (!four_bytes || image.info.num_samples > 1) {
+                    continue;
+                }
+                scheduler.EndRendering();
+                runtime.Transit(&image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
+                                vk::AccessFlagBits2::eTransferRead);
+                runtime.FlushBarriers();
+                const std::string name = fmt::format("pass{:03d}_{:x}_{}", capture_index,
+                                                     image.info.guest_address, vk::to_string(fmt));
+                DumpPassImage(instance, scheduler, scheduler.CommandBuffer(), 0, image.GetImage(),
+                              image.info.size.width, image.info.size.height, name.c_str());
+            }
+            (void)cmdbuf;
+            ++capture_index;
+        } else if (!FrameCapture::IsRecording()) {
+            capture_index = 0;
+        }
+        capture_prev.clear();
+        for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
+            if (cb_descs[cb].first) {
+                capture_prev.push_back(cb_descs[cb].first);
+            }
+        }
         FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
     }
     // bbport: object motion vector attachment of G-buffer pipelines.

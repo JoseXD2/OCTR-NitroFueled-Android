@@ -30,6 +30,10 @@ public:
     static bool IsDisplayBuffer(VAddr address);
 
     /// GPU thread: whether passes are being looked at (armed or recording; cheap).
+    /// GPU thread: the current frame's passes are being recorded.
+    static bool IsRecording() {
+        return state.load(std::memory_order_relaxed) == Recording;
+    }
     static bool Active() {
         return state.load(std::memory_order_relaxed) != Idle;
     }

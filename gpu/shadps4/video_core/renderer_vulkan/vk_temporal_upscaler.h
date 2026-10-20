@@ -41,6 +41,9 @@ class SceneTargets;
 /// as final_<w>x<h> in BB_DUMP_DIR when the trigger file exists (consumed). `image` in General.
 void DumpFinalFrameIfDue(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
                          vk::Image image, u32 width, u32 height, vk::Format format);
+/// bbport (frame capture): a 4-byte-per-texel color image (layout General) to BB_DUMP_DIR.
+void DumpPassImage(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
+                   int index, vk::Image image, u32 width, u32 height, const char* name);
 
 class TemporalUpscaler {
 public:

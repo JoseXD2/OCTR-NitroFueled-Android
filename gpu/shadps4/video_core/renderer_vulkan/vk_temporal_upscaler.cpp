@@ -159,6 +159,11 @@ void PrintIssues(const char* what, u64 issues) {
 
 } // namespace
 
+void DumpPassImage(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
+                   int index, vk::Image image, u32 width, u32 height, const char* name) {
+    DumpImages(instance, scheduler, cmdbuf, index, {{image, width, height, 4, name, "rgba"}});
+}
+
 void DumpFinalFrameIfDue(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
                          vk::Image image, u32 width, u32 height, vk::Format format) {
     static const char* trigger = std::getenv("BB_FINAL_DUMP_TRIGGER");

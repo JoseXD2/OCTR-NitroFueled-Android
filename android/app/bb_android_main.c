@@ -375,6 +375,37 @@ static void *thread_stats_main(void *arg) {
     return NULL;
 }
 
+/* The pipeline cache (user/cache) holds shaders translated by this build; another APK may
+ * translate them differently (Mali workarounds) and stale ones drew black. The cache is moved
+ * aside when libsacredfire.so is not the one that wrote it. */
+static void check_shader_cache(const char *user) {
+    Dl_info dl = {0};
+    struct stat so;
+    if (!dladdr((void *)check_shader_cache, &dl) || !dl.dli_fname || stat(dl.dli_fname, &so)) return;
+    char stamp[128], path[600], old[600], dir[600];
+    snprintf(stamp, sizeof stamp, "%lld %lld\n", (long long)so.st_size, (long long)so.st_mtime);
+    snprintf(dir, sizeof dir, "%s/cache", user);
+    snprintf(path, sizeof path, "%s/cache/.build", user);
+    char seen[128] = {0};
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (!fgets(seen, sizeof seen, f)) seen[0] = 0;
+        fclose(f);
+    }
+    if (strcmp(seen, stamp) != 0) {
+        if (exists(dir)) {
+            snprintf(old, sizeof old, "%s/cache_old_%lld", user, (long long)time(NULL));
+            if (rename(dir, old) == 0) printf("SacredFire Android: new build, shader cache moved to %s\n", old);
+        }
+        mkdir(dir, 0775);
+        f = fopen(path, "w");
+        if (f) {
+            fputs(stamp, f);
+            fclose(f);
+        }
+    }
+}
+
 int bb_android_main(ANativeActivity *activity) {
     wait_for_storage(activity);
     mkdir(DATA_DIR, 0775);
@@ -390,6 +421,7 @@ int bb_android_main(ANativeActivity *activity) {
     char env_file[600];
     snprintf(env_file, sizeof env_file, "%s/env.txt", data);
     load_env_file(env_file);
+    check_shader_cache(user);
     if (!getenv("BB_THREAD_STATS") || getenv("BB_THREAD_STATS")[0] != '0') {
         pthread_t stats;
         if (pthread_create(&stats, NULL, thread_stats_main, NULL) == 0) pthread_detach(stats);
