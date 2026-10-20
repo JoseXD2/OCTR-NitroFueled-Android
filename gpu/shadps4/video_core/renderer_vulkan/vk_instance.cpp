@@ -450,13 +450,10 @@ bool Instance::CreateDevice() {
     }
 
     static constexpr std::array queue_priorities = {1.0f, 1.0f};
-    // SacredFire Android: presentation on a second queue of the graphics family when there is
-    // one (Mali: two). Presenting waits for the display there (the compositor's buffers) without
-    // holding the graphics queue's lock, which blocked every submission meanwhile.
     u32 graphics_queues = 1;
 #ifdef BB_ANDROID
     if (const char* env = std::getenv("BB_PRESENT_QUEUE");
-        family_properties[queue_family_index].queueCount >= 2 && !(env && env[0] == '0')) {
+        family_properties[queue_family_index].queueCount >= 2 && env && env[0] == '1') {
         graphics_queues = 2;
     }
 #endif

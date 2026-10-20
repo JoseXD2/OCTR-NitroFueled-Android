@@ -714,6 +714,21 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     if (frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
         draw_scheduler.WaitSubmitted(frame->ready_tick);
     }
+    // bbport BB_PRESENT_SYNC: 1 waits on the CPU for the frame's GPU work before presenting it,
+    // 2 also waits for the device to go idle after each present (diagnostics), 0 neither.
+    // SacredFire Android: 1 by default; on Mali the present otherwise showed frames whose
+    // rendering had not finished (mostly black: the picture flickered).
+    static const int present_sync = [] {
+        const char* env = std::getenv("BB_PRESENT_SYNC");
+#ifdef BB_ANDROID
+        return env ? std::atoi(env) : 1;
+#else
+        return env ? std::atoi(env) : 0;
+#endif
+    }();
+    if (present_sync >= 1 && frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
+        draw_scheduler.GetWorkSemaphore()->Wait(frame->ready_tick);
+    }
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
@@ -734,6 +749,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                 submit_lock.lock();
             }
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        }
+        if (present_sync >= 2) {
+            if (!submit_lock.owns_lock()) {
+                submit_lock.lock();
+            }
+            (void)instance.GetDevice().waitIdle();
         }
     }
 
