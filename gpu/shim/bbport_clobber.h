@@ -45,6 +45,7 @@ void NoteDecoding(std::uint64_t seq);
 /// A write of `bytes` bytes to guest address `address` the port is about to make (`value`: the
 /// first 8 bytes of what it writes). Reported when it lands inside a submitted command buffer.
 void NoteWrite(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, Source source);
+bool StaleLabel(std::uint64_t address, std::uint32_t bytes);
 /// The remembered writes that touched [address, address + bytes), newest first, on stderr.
 void DumpWritesInto(std::uint64_t address, std::uint64_t bytes);
 

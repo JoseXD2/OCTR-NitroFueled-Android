@@ -243,7 +243,31 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         .pStencilAttachment = db.has_stencil ? &stencil_attachment : nullptr,
     };
 
+    // SacredFire Android BB_PASS_BARRIER=1: a full memory barrier before every render pass.
+    // On Mali the title showed, now and then, a stale or wrong half of the scene; frame
+    // captures (which add transitions between passes) never caught it: a missing dependency
+    // between passes. Costs some GPU time; this checks the cause.
+    static const bool pass_barrier = [] {
+        const char* env = std::getenv("BB_PASS_BARRIER");
+        const bool on = env && env[0] == '1';
+        if (on) {
+            std::printf("GPU: full memory barrier before every render pass (BB_PASS_BARRIER=1)\n");
+        }
+        return on;
+    }();
     if (workers.empty()) {
+        if (pass_barrier) {
+            const vk::MemoryBarrier2 barrier{
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            };
+            current_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &barrier,
+            });
+        }
         current_cmdbuf.beginRendering(rendering_info);
         CarryResume(true);
         return;

@@ -41,10 +41,15 @@ public:
     static void Poll();
 
     static void BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_colors,
-                          const VideoCore::ImageInfo* depth);
+                          const VideoCore::ImageInfo* depth, const u64* color_uids = nullptr,
+                          u64 depth_uid = 0);
     static void Draw(u64 vs_hash, u64 ps_hash, u32 num_indices, u32 num_instances);
     static void Dispatch(u64 cs_hash, u32 x, u32 y, u32 z);
-    static void Sampled(const VideoCore::ImageInfo& info, bool storage);
+    static void Sampled(const VideoCore::ImageInfo& info, bool storage, u64 uid = 0);
+    /// Captures written so far (names the files of each capture apart).
+    static u32 CaptureNumber() {
+        return captures.load(std::memory_order_relaxed);
+    }
     /// Contents of a bound buffer (first 1 KiB), kept for small passes and a pass's first draw.
     static void Buffer(u64 stage_hash, u32 slot, VAddr address, const void* data, u64 size);
     static void Note(const char* text);
@@ -54,6 +59,7 @@ private:
     static inline std::atomic<u32> state{Idle};
     static inline std::atomic<u64> flips{0};
     static inline std::atomic<VAddr> last_presented{0};
+    static inline std::atomic<u32> captures{0};
 };
 
 } // namespace Vulkan

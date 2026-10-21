@@ -151,6 +151,42 @@ void NoteWrite(std::uint64_t address, std::uint64_t value, std::uint32_t bytes, 
     }
 }
 
+bool StaleLabel(std::uint64_t address, std::uint32_t bytes) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_STALE_LABEL_GUARD");
+        return !(env && env[0] == '0');
+    }();
+    if (!enabled || address == 0 || (address & 3) != 0 || (bytes != 4 && bytes != 8)) {
+        return false;
+    }
+    bool inside = false;
+    const std::uint64_t head = ranges_head.load(std::memory_order_relaxed);
+    const std::uint64_t count = std::min<std::uint64_t>(head, ranges.size());
+    for (std::uint64_t i = 0; i < count && !inside; ++i) {
+        const Range& r = ranges[(head - 1 - i) % ranges.size()];
+        inside = r.bytes != 0 && address >= r.base && address + bytes <= r.base + r.bytes;
+    }
+    if (!inside) {
+        return false;
+    }
+    std::uint32_t now_word = 0;
+    std::memcpy(&now_word, reinterpret_cast<const void*>(address), sizeof(now_word));
+    const bool header = (now_word >> 30) == 3 && ((now_word >> 8) & 0xff) != 0 &&
+                        ((now_word >> 16) & 0x3fff) < 0x400;
+    if (!header) {
+        return false;
+    }
+    static std::atomic<std::uint64_t> skipped{0};
+    const std::uint64_t n = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 16 || n % 1000 == 0) {
+        std::fprintf(stderr,
+                     "Stale label skipped: a late fence to %#llx would overwrite the packet header "
+                     "%08x the game has written there since (issue #2 guard; %llu so far)\n",
+                     (unsigned long long)address, now_word, (unsigned long long)n);
+    }
+    return true;
+}
+
 void DumpWritesInto(std::uint64_t address, std::uint64_t bytes) {
     const std::uint64_t now = NowNs();
     const std::uint64_t head = writes_head.load(std::memory_order_relaxed);

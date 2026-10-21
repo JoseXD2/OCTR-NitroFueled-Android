@@ -19,6 +19,7 @@ struct Target {
     VAddr address{};
     vk::Format format{};
     u32 width{}, height{};
+    u64 uid{}; ///< the texture cache's image (two images at one address tell apart)
     bool operator==(const Target&) const = default;
 };
 
@@ -56,15 +57,16 @@ std::vector<VAddr> display_buffers;
 std::array<std::atomic<VAddr>, 16> display_list{};
 std::atomic<u32> display_count{0};
 
-Target ToTarget(const VideoCore::ImageInfo& info) {
-    return {info.guest_address, info.pixel_format, info.size.width, info.size.height};
+Target ToTarget(const VideoCore::ImageInfo& info, u64 uid = 0) {
+    return {info.guest_address, info.pixel_format, info.size.width, info.size.height, uid};
 }
 
 std::string Describe(const Target& t) {
     if (!t.address) {
         return "-";
     }
-    return std::format("{:#x} {} {}x{}", t.address, vk::to_string(t.format), t.width, t.height);
+    return std::format("{:#x} {} {}x{} img{}", t.address, vk::to_string(t.format), t.width,
+                       t.height, t.uid);
 }
 
 void AddSampled(Entry& entry) {
@@ -86,7 +88,8 @@ void AddShader(Entry& entry, u64 hash) {
 void Write(VAddr presented) {
     const char* dir = std::getenv("BB_CAPTURE_DIR");
     const std::string path =
-        std::format("{}/frame_{}.txt", dir ? dir : ".", static_cast<long long>(std::time(nullptr)));
+        std::format("{}/frame_{}_c{:02}.txt", dir ? dir : ".", static_cast<long long>(std::time(nullptr)),
+                    FrameCapture::CaptureNumber());
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         std::printf("Frame capture: cannot write %s\n", path.c_str());
@@ -169,13 +172,15 @@ void FrameCapture::AddDisplayBuffer(VAddr address) {
 }
 
 void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_colors,
-                             const VideoCore::ImageInfo* depth) {
+                             const VideoCore::ImageInfo* depth, const u64* color_uids,
+                             u64 depth_uid) {
     std::vector<Target> targets;
     bool display = false;
     {
         std::scoped_lock lk{display_mutex};
         for (u32 i = 0; i < num_colors; ++i) {
-            targets.push_back(colors[i] ? ToTarget(*colors[i]) : Target{});
+            targets.push_back(colors[i] ? ToTarget(*colors[i], color_uids ? color_uids[i] : 0)
+                                        : Target{});
             display |= colors[i] && std::ranges::find(display_buffers, colors[i]->guest_address) !=
                                         display_buffers.end();
         }
@@ -186,6 +191,7 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     if (display && new_pass) {
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));
+            captures.fetch_add(1, std::memory_order_relaxed);
             entries.clear();
             pending_sampled.clear();
             pending_buffers.clear();
@@ -203,7 +209,7 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
         pending_buffers.clear();
         return;
     }
-    const Target d = depth ? ToTarget(*depth) : Target{};
+    const Target d = depth ? ToTarget(*depth, depth_uid) : Target{};
     if (pass_open && !entries.empty() && !entries.back().compute &&
         entries.back().colors == targets && entries.back().depth == d) {
         return;
@@ -258,9 +264,9 @@ void FrameCapture::Buffer(u64 stage_hash, u32 slot, VAddr address, const void* d
     pending_buffers.push_back(std::move(out));
 }
 
-void FrameCapture::Sampled(const VideoCore::ImageInfo& info, bool storage) {
+void FrameCapture::Sampled(const VideoCore::ImageInfo& info, bool storage, u64 uid) {
     if (pending_sampled.size() < 64) {
-        pending_sampled.emplace_back(ToTarget(info), storage);
+        pending_sampled.emplace_back(ToTarget(info, uid), storage);
     }
 }
 

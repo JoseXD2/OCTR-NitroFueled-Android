@@ -45,6 +45,15 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         trigger_gc_memory = 0;
         pressure_gc_memory = DEFAULT_PRESSURE_GC_MEMORY;
         critical_gc_memory = DEFAULT_CRITICAL_GC_MEMORY;
+        if (const char* env = std::getenv("BB_GC_BUDGET_MB"); env && *env) {
+            const u64 budget = std::strtoull(env, nullptr, 10) << 20;
+            if (budget != 0) {
+                pressure_gc_memory = budget / 100 * 85;
+                critical_gc_memory = budget / 100 * 95;
+                std::printf("GPU: texture budget %llu MiB (BB_GC_BUDGET_MB, no driver budget)\n",
+                            (unsigned long long)(budget >> 20));
+            }
+        }
         return;
     }
 

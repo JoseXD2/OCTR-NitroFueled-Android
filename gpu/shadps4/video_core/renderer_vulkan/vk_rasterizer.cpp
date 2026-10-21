@@ -3193,7 +3193,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
             if (FrameCapture::Active()) {
-                FrameCapture::Sampled(image.info, is_storage);
+                FrameCapture::Sampled(image.info, is_storage, image.image_uid);
             }
 
             vk::ImageView view = *image_view.image_view;
@@ -3820,13 +3820,17 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};
+        std::array<u64, AmdGpu::NUM_COLOR_BUFFERS> color_uids{};
         for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
             if (cb_descs[cb].first) {
-                colors[cb] = &texture_cache.GetImage(cb_descs[cb].first).info;
+                const auto& image = texture_cache.GetImage(cb_descs[cb].first);
+                colors[cb] = &image.info;
+                color_uids[cb] = image.image_uid;
             }
         }
         const auto* depth =
             db_desc.first ? &texture_cache.GetImage(db_desc.first).info : nullptr;
+        const u64 depth_uid = db_desc.first ? texture_cache.GetImage(db_desc.first).image_uid : 0;
         // bbport BB_CAPTURE_IMAGES=1: the color targets of each recorded pass, dumped when the
         // next one starts (BB_DUMP_DIR): where in the frame the picture goes wrong.
         static const bool capture_images = [] {
@@ -3846,12 +3850,32 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                 if (!four_bytes || image.info.num_samples > 1) {
                     continue;
                 }
+                // BB_CAPTURE_SIZES=1280x720,640x720: only targets of these sizes (a capture of
+                // every pass is hundreds of MB on a phone).
+                static const std::string sizes = [] {
+                    const char* env = std::getenv("BB_CAPTURE_SIZES");
+                    return env ? "," + std::string(env) + "," : std::string{};
+                }();
+                static const u32 min_pass = [] {
+                    const char* env = std::getenv("BB_CAPTURE_MIN_PASS");
+                    return env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+                }();
+                if (capture_index < min_pass) {
+                    continue;
+                }
+                if (!sizes.empty() &&
+                    sizes.find(fmt::format(",{}x{},", image.info.size.width,
+                                           image.info.size.height)) == std::string::npos) {
+                    continue;
+                }
                 scheduler.EndRendering();
                 runtime.Transit(&image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
                                 vk::AccessFlagBits2::eTransferRead);
                 runtime.FlushBarriers();
-                const std::string name = fmt::format("pass{:03d}_{:x}_{}", capture_index,
-                                                     image.info.guest_address, vk::to_string(fmt));
+                const std::string name =
+                    fmt::format("c{:02}_pass{:03d}_{:x}_img{}_{}", FrameCapture::CaptureNumber(),
+                                capture_index, image.info.guest_address, image.image_uid,
+                                vk::to_string(fmt));
                 DumpPassImage(instance, scheduler, scheduler.CommandBuffer(), 0, image.GetImage(),
                               image.info.size.width, image.info.size.height, name.c_str());
             }
@@ -3866,7 +3890,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                 capture_prev.push_back(cb_descs[cb].first);
             }
         }
-        FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth);
+        FrameCapture::BeginPass(colors.data(), state.num_color_attachments, depth,
+                                color_uids.data(), depth_uid);
     }
     // bbport: object motion vector attachment of G-buffer pipelines.
     if (key.motion_vectors) {

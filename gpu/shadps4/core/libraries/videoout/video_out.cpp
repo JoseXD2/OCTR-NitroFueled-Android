@@ -285,7 +285,9 @@ s32 PS4_SYSV_ABI sceVideoOutGetVblankStatus(int handle, SceVideoOutVblankStatus*
 }
 
 s32 PS4_SYSV_ABI sceVideoOutGetResolutionStatus(s32 handle, SceVideoOutResolutionStatus* status) {
-    LOG_INFO(Lib_VideoOut, "called");
+    // SacredFire: the game asks every frame; at info level this was most of the log (and of
+    // its writes to /sdcard on Android).
+    LOG_DEBUG(Lib_VideoOut, "called");
     auto* port = driver->GetPort(handle);
     if (!port || !port->is_open) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;

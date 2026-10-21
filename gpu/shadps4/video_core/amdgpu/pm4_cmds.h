@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "bbport_clobber.h"
 #include <cstring>
 #include "common/assert.h"
 #include "common/bit_field.h"
@@ -955,11 +956,15 @@ struct PM4CmdReleaseMem {
     void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
         switch (data_sel.Value()) {
         case DataSelect::Data32Low: {
-            *Address<u32*>() = DataDWord();
+            if (!BbClobber::StaleLabel(Address<u64>(), 4)) {
+                *Address<u32*>() = DataDWord();
+            }
             break;
         }
         case DataSelect::Data64: {
-            *Address<u64*>() = DataQWord();
+            if (!BbClobber::StaleLabel(Address<u64>(), 8)) {
+                *Address<u64*>() = DataQWord();
+            }
             break;
         }
         case DataSelect::GpuClock64: {

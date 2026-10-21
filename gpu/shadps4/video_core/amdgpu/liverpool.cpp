@@ -449,6 +449,10 @@ void SignalEop(const PM4CmdEventWriteEop& eop, u64 seq) {
             BbFreeCheck::NoteFenceWriting(reinterpret_cast<u64>(address));
             BbWriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, BbWriteLog::Fence);
             BbClobber::NoteWrite(reinterpret_cast<u64>(address), data, num_bytes, BbClobber::Eop);
+            if (BbClobber::StaleLabel(reinterpret_cast<u64>(address), num_bytes)) {
+                BbFreeCheck::NoteFenceWritten(reinterpret_cast<u64>(address));
+                return;
+            }
             const auto write_start = std::chrono::steady_clock::now();
             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
                 StoreLabel(address, data, num_bytes);
@@ -597,6 +601,10 @@ void WriteEosLabel(void* address, u64 value, u32 num_bytes) {
     BbFreeCheck::NoteFenceWriting(reinterpret_cast<u64>(address));
     BbWriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, BbWriteLog::Fence);
     BbClobber::NoteWrite(reinterpret_cast<u64>(address), value, num_bytes, BbClobber::Eos);
+    if (BbClobber::StaleLabel(reinterpret_cast<u64>(address), num_bytes)) {
+        BbFreeCheck::NoteFenceWritten(reinterpret_cast<u64>(address));
+        return;
+    }
     if (!memory->TryWriteBacking(address, &value, num_bytes)) {
         StoreLabel(address, value, num_bytes);
     }

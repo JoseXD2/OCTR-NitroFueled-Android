@@ -368,7 +368,11 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
 
-    std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
+    /// SacredFire Android: sized at construction (num_arena_pages). A fixed array of
+    /// MAX_ARENA_PAGES (1 GiB pages) overflowed with the dense arenas' smaller pages once an
+    /// address reached page 1024 (0x1000000000 / 64 MiB = 1024), overwriting the members after
+    /// it (the pending binds: the crash at the first loading screen with 64 MiB arenas).
+    std::vector<const Buffer*> address_space;
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};
     u64 arena_page_size{u64{1} << MAX_ARENA_PAGE_BITS};
     u64 num_arena_pages{u64{1} << (ADDRESS_SPACE_BITS - MAX_ARENA_PAGE_BITS)};

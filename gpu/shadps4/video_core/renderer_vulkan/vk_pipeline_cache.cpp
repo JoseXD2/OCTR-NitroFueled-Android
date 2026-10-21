@@ -670,7 +670,11 @@ bool PipelineCache::AsyncSkippable(const PipelineSelection& selection, bool indi
             async_started = async_skipped = async_waited = 0;
         }
     }
-    if (last_frame_draws < 300) {
+    static const u64 min_draws = [] {
+        const char* env = std::getenv("BB_ASYNC_MIN_DRAWS");
+        return env && *env ? std::strtoull(env, nullptr, 10) : 300ull;
+    }();
+    if (last_frame_draws < min_draws) {
         return false;
     }
     // A full-screen pass (one triangle or quad: lighting, fog, post-processing) waits for its
@@ -937,6 +941,23 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto* fs_info = sel.infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
     key.num_color_attachments = std::bit_width(key.mrt_mask);
+
+    // SacredFire BB_SKIP_GS=1: draws with a geometry shader stage (CTR's fur shells, expanded
+    // through the GS ring) are skipped: characters show their base mesh without fur. For GPUs
+    // where the geometry stage is slow (tile-based mobile GPUs run it in software or with
+    // extra passes); measure with BB_GPU_PROFILE=1 before turning it on.
+    static const bool skip_gs = [] {
+        const char* env = std::getenv("BB_SKIP_GS");
+        const bool on = env && env[0] == '1';
+        if (on) {
+            std::printf("GPU: draws with a geometry shader are skipped (BB_SKIP_GS=1: no fur)\n");
+        }
+        return on;
+    }();
+    if (skip_gs && (regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::EsGs ||
+                    regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::LsHsEsGs)) {
+        return false;
+    }
 
     switch (regs.stage_enable.raw) {
     case AmdGpu::ShaderStageEnable::VgtStages::EsGs:

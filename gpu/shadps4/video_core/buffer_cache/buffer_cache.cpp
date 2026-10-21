@@ -523,6 +523,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         std::printf("GPU: no sparse buffers on this device: dense buffer arenas of %llu MiB\n",
                     (unsigned long long)(arena_page_size >> 20));
     }
+    address_space.assign(num_arena_pages, nullptr);
     const vk::BufferCreateInfo probe_ci = {
         .flags = dense_arenas ? vk::BufferCreateFlags{}
                               : vk::BufferCreateFlagBits::eSparseBinding |
