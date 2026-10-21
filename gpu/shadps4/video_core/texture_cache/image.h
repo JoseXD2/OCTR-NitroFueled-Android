@@ -34,6 +34,7 @@ enum ImageFlagBits : u32 {
     GpuModified = 1 << 3, ///< Contents have been modified from the GPU
     Registered = 1 << 6,  ///< True when the image is registered
     Picked = 1 << 7,      ///< Temporary flag to mark the image as picked
+    Aliased = 1 << 8,     ///< another image has the same guest address (alias_states; from gow3_android)
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 
@@ -170,6 +171,7 @@ public:
     ImageId depth_id{};
     u64 depth_uid{};
     u64 image_uid{};
+    u64 alias_generation{}; ///< from gow3_android: write order among aliases
 
     ImageInfo info;
     Vulkan::Runtime* runtime;

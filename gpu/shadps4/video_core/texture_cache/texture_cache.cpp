@@ -20,6 +20,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 namespace VideoCore {
@@ -200,6 +201,138 @@ void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
     UntrackImage(image_id);
 }
 
+// SacredFire: from gow3_android (zFitness): images sharing guest memory (aliases), ported there
+// from cuesta4/shadPS4 (eltutz) commit 189ca3b6. A write to one is copied into the others before they are read, as on the PS4,
+// where they are the same memory.
+static bool Covers(const Extent3D& extent, const ImageInfo& info) {
+    return extent.width == info.size.width && extent.height == info.size.height &&
+           extent.depth == info.size.depth;
+}
+
+static bool CanAlias(const Image& lhs, const Image& rhs) {
+    return GetAliasCopyExtent(lhs.info, rhs.info) || GetAliasCopyExtent(rhs.info, lhs.info);
+}
+
+template <typename Func>
+void TextureCache::ForEachAlias(const Image& image, Func&& func) {
+    const auto page = page_table.find(image.info.guest_address >> Traits::PageBits);
+    if (page == nullptr) {
+        return;
+    }
+    for (const ImageId candidate_id : *page) {
+        Image& candidate = slot_images[candidate_id];
+        if (&candidate != &image && candidate.info.guest_address == image.info.guest_address &&
+            CanAlias(candidate, image)) {
+            func(candidate_id, candidate);
+        }
+    }
+}
+
+void TextureCache::SynchronizeAlias(ImageId image_id) {
+    Image& dst = slot_images[image_id];
+    if (False(dst.flags & ImageFlagBits::Aliased)) {
+        return;
+    }
+    const auto state_it = alias_states.find(dst.info.guest_address);
+    if (state_it == alias_states.end()) {
+        return;
+    }
+    AliasState& state = state_it.value();
+    if (!IsLiveImage(state.backing, state.backing_uid)) {
+        if (!IsLiveImage(state.writer, state.writer_uid)) {
+            state.ResetAuthority();
+            return;
+        }
+        state.backing = state.writer, state.backing_uid = state.writer_uid;
+        state.writer = {}, state.writer_uid = 0;
+    }
+    if (state.writer == image_id && state.writer_uid == dst.image_uid) {
+        return;
+    }
+    if (!CommitAliasWriter(state)) {
+        state.ResetAuthority();
+        return;
+    }
+    Image& current = slot_images[state.backing];
+    const std::optional extent = GetAliasCopyExtent(current.info, dst.info);
+    if (state.backing == image_id || current.alias_generation <= dst.alias_generation || !extent) {
+        return;
+    }
+    CopyAlias(state.backing, image_id, *extent);
+    dst.alias_generation = current.alias_generation;
+    const std::optional reverse = GetAliasCopyExtent(dst.info, current.info);
+    if (reverse && Covers(*reverse, current.info) && !Covers(*extent, dst.info)) {
+        state.backing = image_id, state.backing_uid = dst.image_uid;
+    }
+}
+
+bool TextureCache::CommitAliasWriter(AliasState& state) {
+    if (!state.writer) {
+        return true;
+    }
+    if (!IsLiveImage(state.writer, state.writer_uid) ||
+        !IsLiveImage(state.backing, state.backing_uid)) {
+        return false;
+    }
+    Image& writer = slot_images[state.writer];
+    Image& backing = slot_images[state.backing];
+    if (state.writer != state.backing && writer.alias_generation > backing.alias_generation) {
+        const std::optional extent = GetAliasCopyExtent(writer.info, backing.info);
+        if (!extent) {
+            return false;
+        }
+        CopyAlias(state.writer, state.backing, *extent);
+        backing.alias_generation = writer.alias_generation;
+    }
+    state.writer = {}, state.writer_uid = 0;
+    return true;
+}
+
+void TextureCache::CopyAlias(ImageId src_id, ImageId dst_id, const Extent3D& extent) {
+    Image& dst = slot_images[dst_id];
+    runtime.CopyAliasImage(&slot_images[src_id], &dst, {extent.width, extent.height, extent.depth});
+    dst.flags |= ImageFlagBits::GpuModified;
+    dst.flags &= ~ImageFlagBits::Dirty;
+}
+
+void TextureCache::PublishAliasWrite(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    image.alias_generation = ++alias_generation;
+    if (False(image.flags & ImageFlagBits::Aliased)) {
+        return;
+    }
+    std::scoped_lock lock{mutex};
+    AliasState& state = alias_states[image.info.guest_address];
+    if (IsLiveImage(state.backing, state.backing_uid) &&
+        !CanAlias(image, slot_images[state.backing])) {
+        state.ResetAuthority();
+    }
+    state.members = std::max(state.members, 2u);
+    if (state.writer == image_id && state.writer_uid == image.image_uid) {
+        return;
+    }
+    if (IsLiveImage(state.backing, state.backing_uid)) {
+        const ImageInfo& backing = slot_images[state.backing].info;
+        const std::optional extent = GetAliasCopyExtent(image.info, backing);
+        if (extent && Covers(*extent, backing)) {
+            state.backing = image_id, state.backing_uid = image.image_uid;
+        } else {
+            state.writer = image_id, state.writer_uid = image.image_uid;
+        }
+    } else {
+        state.backing = image_id, state.backing_uid = image.image_uid;
+    }
+}
+
+void TextureCache::InvalidateAlias(Image& image) {
+    image.alias_generation = 0;
+    if (True(image.flags & ImageFlagBits::Aliased)) {
+        if (const auto it = alias_states.find(image.info.guest_address); it != alias_states.end()) {
+            it.value().ResetAuthority();
+        }
+    }
+}
+
 void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     std::scoped_lock lock{mutex};
     const auto pages_start = PageManager::GetPageAddr(addr);
@@ -210,6 +343,7 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
         if (image.Overlaps(addr, size)) {
             // Modified region overlaps image, so the image was definitely accessed by this fault.
             // Untrack the image, so that the range is unprotected and the guest can write freely.
+            InvalidateAlias(image);
             image.flags |= ImageFlagBits::CpuDirty;
             PageManager::NoteImageFault(image.info.guest_address, image.info.guest_size,
                                         image.info.size.width, image.info.size.height,
@@ -273,6 +407,7 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
         }
         // Ensure image is reuploaded when accessed again.
         WatchImage(image, "GPU write (marked for refresh)");
+        InvalidateAlias(image);
         image.flags |= ImageFlagBits::GpuDirty;
     });
 }
@@ -799,6 +934,9 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
     if (refresh) {
         UpdateImage(image_id);
     }
+    if (desc.type == BindingType::Storage) {
+        PublishAliasWrite(image_id);
+    }
     if (memo && !BbToggle::Disabled(BbToggle::TextureViewMemo)) {
         if (memo->image_id == image_id && memo->backing == image.backing && memo->view_id) {
             return slot_image_views[memo->view_id];
@@ -827,6 +965,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     }
     image.usage.render_target = 1u;
     UpdateImage(image_id);
+    PublishAliasWrite(image_id);
 
     // Register meta data for this color buffer
     if (desc.info.meta_info.cmask_addr) {
@@ -1049,6 +1188,29 @@ void TextureCache::RegisterImage(ImageId image_id) {
     BbStats::live_images.fetch_add(1, std::memory_order_relaxed);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     image.lru_touched_tick = gc_tick;
+
+    // From gow3_android: the images already at this address that can share its memory.
+    AliasState* state{};
+    u32 aliases{};
+    bool inserted{};
+    ForEachAlias(image, [&](ImageId candidate_id, Image& candidate) {
+        if (!state) {
+            auto result = alias_states.try_emplace(image.info.guest_address);
+            state = std::addressof(result.first.value());
+            inserted = result.second;
+        }
+        ++aliases;
+        candidate.flags |= ImageFlagBits::Aliased;
+        if (!IsLiveImage(state->backing, state->backing_uid) ||
+            slot_images[state->backing].alias_generation < candidate.alias_generation) {
+            state->backing = candidate_id, state->backing_uid = candidate.image_uid;
+        }
+    });
+    if (state) {
+        image.flags |= ImageFlagBits::Aliased;
+        state->members = inserted ? aliases + 1 : state->members + 1;
+    }
+
     ForEachPage(image.info.guest_address, image.info.guest_size,
                 [this, image_id](u64 page) { page_table[page].push_back(image_id); });
 }
@@ -1421,6 +1583,27 @@ void TextureCache::DeleteImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
+
+    const auto alias_it = True(image.flags & ImageFlagBits::Aliased)
+                              ? alias_states.find(image.info.guest_address)
+                              : alias_states.end();
+    if (alias_it != alias_states.end()) {
+        AliasState& state = alias_it.value();
+        // No copy here (DeleteImage also runs on guest threads through UnmapMemory, which must
+        // not record commands); the aliases then re-read guest memory.
+        if ((state.writer == image_id && state.writer_uid == image.image_uid) ||
+            (state.backing == image_id && state.backing_uid == image.image_uid)) {
+            state.ResetAuthority();
+        }
+        if (state.members <= 2) {
+            ForEachAlias(image, [](ImageId, Image& candidate) {
+                candidate.flags &= ~ImageFlagBits::Aliased;
+            });
+            alias_states.erase(alias_it);
+        } else {
+            --state.members;
+        }
+    }
 
     // Remove any registered meta areas.
     const auto& meta_info = image.info.meta_info;

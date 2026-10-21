@@ -78,6 +78,8 @@ public:
                        std::span<const vk::BufferImageCopy> download_copies);
 
     void CopyImage(VideoCore::Image* src, VideoCore::Image* dst);
+    /// From gow3_android: copies `extent` of one image into another at the same address.
+    void CopyAliasImage(VideoCore::Image* src, VideoCore::Image* dst, const vk::Extent3D& extent);
     void CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
                              const VideoCore::Buffer* buffer, u64 offset);
     void CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice);

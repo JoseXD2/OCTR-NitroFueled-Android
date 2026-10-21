@@ -862,7 +862,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // bbport: with a frame limit or the uncapped presets a queued flip is presented as soon
         // as it arrives and its slot allows (no limit: at once), between vblanks, instead of on
         // the next vblank tick.
-        const bool immediate_flips = frame_limit != 0 || EmulatorSettings.IsUncappedVblank();
+        // SacredFire (from gow3_android): only when the limit exceeds the vblank rate; at or
+        // below it the vblank-paced flip above already satisfies the limit, and the sub-vblank
+        // path stalled the guest there (gow3: black screen at boot with fps_limit set).
+        const bool immediate_flips = frame_limit > EmulatorSettings.GetVblankFrequency() ||
+                                     EmulatorSettings.IsUncappedVblank();
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 
